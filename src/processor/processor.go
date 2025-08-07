@@ -8,6 +8,8 @@ import (
 
 type Callback func(*nfqueue.Attribute) int
 
+var processPacket = mangle.ProcessPacket
+
 func New(cfg *config.Config) Callback {
 	return func(a *nfqueue.Attribute) int {
 		// Skip packets that already carry our mark (avoid loops)
@@ -17,7 +19,7 @@ func New(cfg *config.Config) Callback {
 		if a.Payload == nil || len(*a.Payload) == 0 {
 			return nfqueue.NfAccept
 		}
-		switch mangle.ProcessPacket(cfg, *a.Payload) {
+		switch processPacket(cfg, *a.Payload) {
 		case mangle.VerdictDrop:
 			return nfqueue.NfDrop
 		default:

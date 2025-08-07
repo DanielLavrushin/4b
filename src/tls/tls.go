@@ -1,4 +1,3 @@
-// tls/parse.go
 package tls
 
 import "golang.org/x/crypto/cryptobyte"
@@ -11,7 +10,7 @@ func ExtractSNI(payload []byte) (hostname []byte, err error) {
 		return nil, errNotHello
 	}
 	var legacyVersion uint16
-	if !s.Skip(1) || !s.ReadUint16(&legacyVersion) { // minor version, length in 2 bytes
+	if !s.Skip(1) || !s.ReadUint16(&legacyVersion) { // skip 1 byte, read legacy_version
 		return nil, errNotHello
 	}
 	var rec cryptobyte.String

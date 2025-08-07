@@ -10,6 +10,15 @@ import (
 	"github.com/google/gopacket/layers"
 )
 
+var (
+	sendRaw     = SendRaw
+	sendDelayed = SendDelayed
+	ip4FragFn   = ip4Frag
+	tcpFragFn   = tcpFrag
+	extractSNI  = tls.ExtractSNI
+	sendFakeSeq = sendFakeSequence
+)
+
 func sendAlteredSyn(tcp *layers.TCP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 	sec *config.Section) Verdict {
 
@@ -56,7 +65,7 @@ func sendAlteredSyn(tcp *layers.TCP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 
 	raw := buf.Bytes()
 
-	if err := SendRaw(raw); err != nil {
+	if err := sendRaw(raw); err != nil {
 		return VerdictAccept
 	}
 	return VerdictDrop
@@ -82,7 +91,7 @@ func processTCP(tcp *layers.TCP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 	}
 
 	// 0. TLS ClientHello → grab SNI
-	sni, err := tls.ExtractSNI(payload)
+	sni, err := extractSNI(payload)
 	if err != nil {
 		return VerdictContinue
 	}
@@ -124,7 +133,7 @@ func processTCP(tcp *layers.TCP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 		if ip4 == nil {
 			break
 		}
-		frag1, frag2, err := ip4Frag(origPacket, splitAt-ipHdrLen)
+		frag1, frag2, err := ip4FragFn(origPacket, splitAt-ipHdrLen)
 		if err != nil {
 			return VerdictAccept
 		}
@@ -132,7 +141,7 @@ func processTCP(tcp *layers.TCP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 		return VerdictDrop           // we’re done
 
 	case config.FragStratTCP:
-		frag1, frag2, err := tcpFrag(origPacket, splitAt)
+		frag1, frag2, err := tcpFragFn(origPacket, splitAt)
 		if err != nil {
 			return VerdictAccept
 		}
@@ -203,27 +212,27 @@ func processTCP(tcp *layers.TCP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 	if sec.FakeSNI {
 		fake, err := build(sec.FakeSNIPkt, baseSeq)
 		if err == nil {
-			_ = SendRaw(fake) // ignore error
+			_ = sendRaw(fake) // ignore error
 		}
 	}
 
 	// 4.4b  full fake-sequence storm (RandSeq / PastSeq / TTL …)
-	sendFakeSequence(fakeTypeFromSection(sec), tcp, ip4, ip6)
+	sendFakeSeq(fakeTypeFromSection(sec), tcp, ip4, ip6)
 
 	// 4.5  send the real pieces (order may be reversed if requested)
 	if sec.FragSNIReverse {
-		_ = SendRaw(pkt2)
+		_ = sendRaw(pkt2)
 		if sec.Seg2Delay > 0 {
-			_ = SendDelayed(pkt1, sec.Seg2Delay)
+			_ = sendDelayed(pkt1, sec.Seg2Delay)
 		} else {
-			_ = SendRaw(pkt1)
+			_ = sendRaw(pkt1)
 		}
 	} else { // normal order
-		_ = SendRaw(pkt1)
+		_ = sendRaw(pkt1)
 		if sec.Seg2Delay > 0 {
-			_ = SendDelayed(pkt2, sec.Seg2Delay)
+			_ = sendDelayed(pkt2, sec.Seg2Delay)
 		} else {
-			_ = SendRaw(pkt2)
+			_ = sendRaw(pkt2)
 		}
 	}
 
@@ -232,18 +241,18 @@ func processTCP(tcp *layers.TCP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 
 func sendFrags(sec *config.Section, a, b []byte) {
 	if sec.FragSNIReverse {
-		_ = SendRaw(b)
+		_ = sendRaw(b)
 		if sec.Seg2Delay > 0 {
-			_ = SendDelayed(a, sec.Seg2Delay)
+			_ = sendDelayed(a, sec.Seg2Delay)
 		} else {
-			_ = SendRaw(a)
+			_ = sendRaw(a)
 		}
 	} else {
-		_ = SendRaw(a)
+		_ = sendRaw(a)
 		if sec.Seg2Delay > 0 {
-			_ = SendDelayed(b, sec.Seg2Delay)
+			_ = sendDelayed(b, sec.Seg2Delay)
 		} else {
-			_ = SendRaw(b)
+			_ = sendRaw(b)
 		}
 	}
 }

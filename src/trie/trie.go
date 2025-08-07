@@ -1,16 +1,18 @@
 package trie
 
-// Matcher is a suffix-matcher for ASCII hostnames.
-// It is *case-insensitive* and treats dots as separators.
 type Matcher struct{ root node }
+
+func NewMatcher() *Matcher { return &Matcher{} }
+
+func (m *Matcher) Insert(b []byte) {
+	_ = m.Add(string(b))
+}
 
 type node struct {
 	leaf bool
 	next [256]*node
 }
 
-// Add inserts one hostname.  “googlevideo.com” and “youtu.be” are OK.
-// It lower-cases ASCII bytes and ignores trailing dots.
 func (m *Matcher) Add(pat string) error {
 	cur := &m.root
 	for i := len(pat) - 1; i >= 0; i-- { // build backwards ⇒ suffix-tree
@@ -27,24 +29,25 @@ func (m *Matcher) Add(pat string) error {
 	return nil
 }
 
-// Match scans s and reports whether any suffix in the tree appears.
 // If mapToEnd==false we return as soon as *any* match is seen.
 // If mapToEnd==true we only succeed if the match ends at the last byte.
 func (m *Matcher) Match(s []byte, mapToEnd bool) (bool, int, int) {
-	for i := 0; i < len(s); i++ {
+	// Scan all possible *end* positions (right‑to‑left),
+	// then walk the trie backwards from each end.
+	for end := len(s) - 1; end >= 0; end-- {
 		cur := &m.root
-		for j := i; j < len(s); j++ {
-			b := s[len(s)-1-j+i] // walk backwards
+		for j := end; j >= 0; j-- {
+			b := s[j]
 			if 'A' <= b && b <= 'Z' {
 				b += 'a' - 'A'
 			}
 			cur = cur.next[b]
 			if cur == nil {
-				break
+				break // this path can’t match; move end‑pointer leftwards
 			}
 			if cur.leaf {
-				if !mapToEnd || j == len(s)-1 {
-					return true, i, j - i + 1
+				if !mapToEnd || end == len(s)-1 {
+					return true, j, end - j + 1
 				}
 			}
 		}

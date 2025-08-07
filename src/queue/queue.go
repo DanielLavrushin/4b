@@ -22,7 +22,7 @@ var openNFQ = func(c *nfqueue.Config) (nfqIface, error) {
 }
 
 type Worker struct {
-	q      *nfqueue.Nfqueue
+	q      nfqIface
 	id     uint16
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -47,7 +47,7 @@ func NewWorker(conf Config, cb processor.Callback) (*Worker, error) {
 		flags |= nfqueue.NfQaCfgFlagConntrack
 	}
 
-	q, err := nfqueue.Open(&nfqueue.Config{
+	q, err := openNFQ(&nfqueue.Config{
 		NfQueue:      conf.ID,
 		MaxPacketLen: 0xffff, // copy full packet
 		Copymode:     nfqueue.NfQnlCopyPacket,

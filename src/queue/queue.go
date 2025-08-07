@@ -7,8 +7,19 @@ import (
 
 	nfqueue "github.com/florianl/go-nfqueue"
 
-	"github.com/daniellavrushin/4b/processor"
+	"github.com/daniellavrushin/b4/processor"
 )
+
+type nfqIface interface {
+	RegisterWithErrorFunc(ctx context.Context,
+		fn nfqueue.HookFunc, errFn nfqueue.ErrorFunc) error
+	SetVerdict(id uint32, verdict int) error
+	Close() error
+}
+
+var openNFQ = func(c *nfqueue.Config) (nfqIface, error) {
+	return nfqueue.Open(c)
+}
 
 type Worker struct {
 	q      *nfqueue.Nfqueue

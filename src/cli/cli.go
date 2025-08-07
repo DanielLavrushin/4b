@@ -8,7 +8,7 @@ import (
 
 	"github.com/spf13/pflag"
 
-	"github.com/daniellavrushin/4b/config"
+	"github.com/daniellavrushin/b4/config"
 )
 
 // Parse fills cfg *in‑place*, creates new sections when --fbegin / --fend
@@ -23,7 +23,7 @@ func Parse(cfg *config.Config, args []string) ([]*config.Section, error) {
 	}
 
 	// define root‑scoped flags
-	fs := pflag.NewFlagSet("4b", pflag.ContinueOnError)
+	fs := pflag.NewFlagSet("b4", pflag.ContinueOnError)
 	queueNum := fs.Uint("queue-num", cfg.QueueStartNum, "NFQUEUE id")
 	threads := fs.Int("threads", cfg.Threads, "Number of NFQUEUE workers")
 	silent := fs.Bool("silent", false, "Verbosity INFO")

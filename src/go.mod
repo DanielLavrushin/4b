@@ -1,4 +1,4 @@
-module github.com/daniellavrushin/4b
+module github.com/daniellavrushin/b4
 
 go 1.24.2
 

@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"log"
 
-	"github.com/daniellavrushin/4b/config"
-	"github.com/daniellavrushin/4b/tls"
+	"github.com/daniellavrushin/b4/config"
+	"github.com/daniellavrushin/b4/tls"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 )

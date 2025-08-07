@@ -4,7 +4,7 @@ import (
 	"net"
 	"testing"
 
-	"github.com/daniellavrushin/4b/config"
+	"github.com/daniellavrushin/b4/config"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 )

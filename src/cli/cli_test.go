@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/daniellavrushin/4b/config"
+	"github.com/daniellavrushin/b4/config"
 )
 
 func TestParse_BasicFlags(t *testing.T) {

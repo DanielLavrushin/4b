@@ -1,6 +1,6 @@
 package tls
 
-import "github.com/daniellavrushin/4b/trie"
+import "github.com/daniellavrushin/b4/trie"
 
 type Section struct {
 	AllDomains bool

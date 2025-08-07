@@ -1,8 +1,8 @@
 package processor
 
 import (
-	"github.com/daniellavrushin/4b/config"
-	"github.com/daniellavrushin/4b/mangle"
+	"github.com/daniellavrushin/b4/config"
+	"github.com/daniellavrushin/b4/mangle"
 	nfqueue "github.com/florianl/go-nfqueue"
 )
 

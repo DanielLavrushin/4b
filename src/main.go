@@ -5,12 +5,12 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/daniellavrushin/4b/cli"
-	"github.com/daniellavrushin/4b/config"
-	"github.com/daniellavrushin/4b/mangle"
-	"github.com/daniellavrushin/4b/processor"
-	"github.com/daniellavrushin/4b/queue"
-	"github.com/daniellavrushin/4b/rawsock"
+	"github.com/daniellavrushin/b4/cli"
+	"github.com/daniellavrushin/b4/config"
+	"github.com/daniellavrushin/b4/mangle"
+	"github.com/daniellavrushin/b4/processor"
+	"github.com/daniellavrushin/b4/queue"
+	"github.com/daniellavrushin/b4/rawsock"
 )
 
 func main() {

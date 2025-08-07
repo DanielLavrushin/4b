@@ -4,7 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 
-	"github.com/daniellavrushin/4b/utils"
+	"github.com/daniellavrushin/b4/utils"
 )
 
 // ip4Frag splits an IPv4 packet into two fragments at an 8-byte–aligned

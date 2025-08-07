@@ -7,7 +7,6 @@ import (
 	"github.com/google/gopacket/layers"
 )
 
-// Verdict mirrors PKT_* in C
 type Verdict int
 
 const (
@@ -25,31 +24,42 @@ func ProcessPacket(cfg *config.Config, bytes []byte) Verdict {
 		pl  gopacket.Payload
 	)
 
-	parser := gopacket.NewDecodingLayerParser(
-		layers.LayerTypeIPv4,
-		&ip4, &ip6, &tcp, &udp, &pl,
-	)
+	first := layers.LayerTypeIPv4
+	if IPVersion(bytes) == 6 {
+		first = layers.LayerTypeIPv6
+	}
+	parser := gopacket.NewDecodingLayerParser(first, &ip4, &ip6, &tcp, &udp, &pl)
+
 	decoded := []gopacket.LayerType{}
 	if err := parser.DecodeLayers(bytes, &decoded); err != nil {
-		return VerdictAccept // malformed → let kernel decide (original “goto accept”)
+		return VerdictAccept
+	}
+
+	// figure out which IP header we actually have
+	var ip4p *layers.IPv4
+	var ip6p *layers.IPv6
+	for _, lt := range decoded {
+		if lt == layers.LayerTypeIPv4 {
+			ip4p = &ip4
+		}
+		if lt == layers.LayerTypeIPv6 {
+			ip6p = &ip6
+		}
 	}
 
 	for _, sec := range cfg.Sections() {
-
 		verdict := VerdictContinue
-
 		for _, lt := range decoded {
 			switch lt {
 			case layers.LayerTypeTCP:
-				verdict = processTCP(&tcp, &ip4, &ip6, pl, sec, bytes)
+				verdict = processTCP(&tcp, ip4p, ip6p, pl, sec, bytes)
 			case layers.LayerTypeUDP:
-				verdict = processUDP(&udp, &ip4, &ip6, pl, sec, bytes)
+				verdict = processUDP(&udp, ip4p, ip6p, pl, sec, bytes)
 			}
 			if verdict != VerdictContinue {
 				return verdict
 			}
 		}
 	}
-	// none of the sections cared ⇒ accept
 	return VerdictAccept
 }

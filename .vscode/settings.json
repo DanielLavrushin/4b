@@ -2,18 +2,6 @@
   "editor.formatOnSave": true,
   "editor.defaultFormatter": "esbenp.prettier-vscode",
   "files.eol": "\n",
-  "[shellscript]": {
-    "editor.defaultFormatter": "foxundermoon.shell-format"
-  },
-  "[dotenv]": {
-    "editor.defaultFormatter": "foxundermoon.shell-format"
-  },
-  "[ignore]": {
-    "editor.defaultFormatter": "foxundermoon.shell-format"
-  },
-  "[properties]": {
-    "editor.defaultFormatter": "foxundermoon.shell-format"
-  },
   "explorer.fileNesting.enabled": true,
   "explorer.fileNesting.expand": false,
   "explorer.fileNesting.patterns": {
@@ -109,5 +97,8 @@
     "*.w": "$(capture).*.w, I$(capture).w",
     "*.wat": "$(capture).wasm",
     "*.xaml": "$(capture).xaml.cs"
+  },
+  "[go]": {
+    "editor.defaultFormatter": "golang.go"
   }
 }

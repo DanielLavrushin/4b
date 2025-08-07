@@ -1,5 +1,9 @@
 package mangle
 
-var SendRaw func(pkt []byte) error = func(_ []byte) error { return nil }
+var (
+	SendRaw     = func([]byte) error { return nil }
+	SendDelayed = func([]byte, uint) error { return nil }
+)
 
-var SendDelayed func(pkt []byte, delayMs uint) error = func(_ []byte, _ uint) error { return nil }
+func SetRawSendFunc(f func([]byte) error)           { SendRaw = f }
+func SetDelayedSendFunc(f func([]byte, uint) error) { SendDelayed = f }

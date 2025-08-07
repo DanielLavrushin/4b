@@ -72,56 +72,54 @@ func DecryptInitial(dcid []byte, packet []byte) ([]byte, bool) {
 
 func deriveInitial(dcid []byte, version uint32) (cipher.Block, cipher.AEAD, []byte, error) {
 	var salt []byte
-	var labelIn, labelKey, labelIV, labelHP []byte
-
 	switch version {
 	case 0x00000001:
 		salt = saltV1
-		labelIn = []byte("tls13 client in\x00")
-		labelKey = []byte("tls13 quic key\x00")
-		labelIV = []byte("tls13 quic iv\x00")
-		labelHP = []byte("tls13 quic hp\x00")
 	case 0x709a50c4:
 		salt = saltV2
-		labelIn = []byte("tls13 client in\x00")
-		labelKey = []byte("tls13 quicv2 key\x00")
-		labelIV = []byte("tls13 quicv2 iv\x00")
-		labelHP = []byte("tls13 quicv2 hp\x00")
 	default:
 		return nil, nil, nil, errors.New("unknown version")
 	}
 
-	h := hkdf.New(sha256.New, dcid, salt, labelIn)
+	// --- Step 1: initial secret = HKDF-Extract(salt, dcid)
 	secret := make([]byte, secretSize)
-	if _, err := io.ReadFull(h, secret); err != nil {
+	if _, err := io.ReadFull(hkdf.New(sha256.New, dcid, salt, nil), secret); err != nil {
 		return nil, nil, nil, err
 	}
-	prk := hkdf.New(sha256.New, secret, nil, labelKey)
-	key := make([]byte, keySize)
-	if _, err := io.ReadFull(prk, key); err != nil {
+
+	client, err := hkdfExpandLabel(secret, "client in", secretSize)
+	if err != nil {
 		return nil, nil, nil, err
 	}
-	prk = hkdf.New(sha256.New, secret, nil, labelIV)
-	iv := make([]byte, ivSize)
-	if _, err := io.ReadFull(prk, iv); err != nil {
+
+	// --- Step 2: derive key/iv/hp with the *labelled* expand
+	key, err := hkdfExpandLabel(client, "quic key", keySize)
+	if err != nil {
 		return nil, nil, nil, err
 	}
-	prk = hkdf.New(sha256.New, secret, nil, labelHP)
-	hpkey := make([]byte, keySize)
-	if _, err := io.ReadFull(prk, hpkey); err != nil {
+	iv, err := hkdfExpandLabel(client, "quic iv", ivSize)
+	if err != nil {
 		return nil, nil, nil, err
 	}
+	hpkey, err := hkdfExpandLabel(client, "quic hp", keySize)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	// --- Step 3: build ciphers
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, nil, nil, err
 	}
+
 	hp, err := aes.NewCipher(hpkey)
 	if err != nil {
 		return nil, nil, nil, err
 	}
+
 	aead, err := cipher.NewGCM(block)
 	if err != nil {
 		return nil, nil, nil, err
 	}
+
 	return hp, aead, iv, nil
 }

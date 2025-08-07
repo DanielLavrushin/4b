@@ -1,6 +1,10 @@
 package config
 
-import "strings"
+import (
+	"encoding/hex"
+	"fmt"
+	"strings"
+)
 
 type Logging struct {
 	Verbose    int
@@ -149,6 +153,14 @@ var DefaultConfig = Config{
 	Instaflush:     false,
 }
 
+func NewSection(id int) *Section {
+    s := DefaultSection      // copy
+    s.ID = id
+    s.prev, s.next = nil, nil
+    s.ensureFakePayload()
+    return &s
+}
+
 func (c *Config) Sections() []*Section {
 	var list []*Section
 	for s := c.FirstSection; s != nil; s = s.next {
@@ -178,4 +190,11 @@ func (s *Section) MatchesSNI(host string) bool {
 		}
 	}
 	return false
+}
+
+func hexToBytes(hexStr string) ([]byte, error) {
+    if len(hexStr)%2 != 0 { return nil, fmt.Errorf("odd hex length") }
+    out := make([]byte, len(hexStr)/2)
+    _, err := hex.Decode(out, []byte(hexStr))
+    return out, err
 }

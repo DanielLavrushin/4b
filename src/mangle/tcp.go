@@ -241,7 +241,9 @@ func processTCP(tcp *layers.TCP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 		}
 		sendFakeSeq(ft, tcp, ip4, ip6)
 	}
-	if sec.Seg2Delay > 0 {
+
+	dvsLocal := len(first)
+	if sec.Seg2Delay > 0 && ((dvsLocal > 0) != sec.FragSNIReverse) {
 		_ = sendDelayed(secondReal, sec.Seg2Delay)
 	} else {
 		_ = sendRaw(secondReal)
@@ -272,7 +274,7 @@ func sendFrags(sec *config.Section, a, b []byte, dvs int, tcp *layers.TCP, ip4 *
 		}
 		sendFakeSeq(ft, tcp, ip4, ip6)
 	}
-	if sec.Seg2Delay > 0 {
+	if sec.Seg2Delay > 0 && ((dvs > 0) != sec.FragSNIReverse) {
 		_ = sendDelayed(second, sec.Seg2Delay)
 	} else {
 		_ = sendRaw(second)
@@ -316,50 +318,102 @@ func overrideTCPWindow(raw []byte, win uint16) ([]byte, bool) {
 		}
 	}
 
-	// ---------- IPv6 / fallback via gopacket ----------
-	try := func(first gopacket.LayerType) ([]byte, bool) {
-		var ip4 layers.IPv4
-		var ip6 layers.IPv6
-		var tcp layers.TCP
-		var app gopacket.Payload
+	// ---------- IPv6 fast path (no extension headers) ----------
+	if len(raw) >= 40 && (raw[0]>>4) == 6 && raw[6] == 6 { // IPv6 + NextHeader=TCP
+		out := make([]byte, len(raw))
+		copy(out, raw)
 
-		parser := gopacket.NewDecodingLayerParser(first, &ip4, &ip6, &tcp, &app)
-		decoded := []gopacket.LayerType{}
-		if err := parser.DecodeLayers(raw, &decoded); err != nil {
-			return nil, false
-		}
-		hasTCP := false
-		var ipL gopacket.SerializableLayer
-		for _, lt := range decoded {
-			switch lt {
-			case layers.LayerTypeTCP:
-				hasTCP = true
-			case layers.LayerTypeIPv4:
-				ipL = &ip4
-			case layers.LayerTypeIPv6:
-				ipL = &ip6
-			}
-		}
-		if !hasTCP || ipL == nil {
-			return nil, false
-		}
-		if tcp.Window == win { // nothing to do
+		tcpStart := 40 // fixed IPv6 header
+		if len(out) < tcpStart+20 {
 			return raw, false
 		}
 
-		tcp.Window = win
+		oldWin := binary.BigEndian.Uint16(out[tcpStart+14 : tcpStart+16])
+		if oldWin == win {
+			return raw, false // already set
+		}
+
+		// Write new window
+		binary.BigEndian.PutUint16(out[tcpStart+14:tcpStart+16], win)
+
+		// Recompute TCP checksum with IPv6 pseudo-header
+		out[tcpStart+16], out[tcpStart+17] = 0, 0
+		tcpLen := len(out) - tcpStart
+
+		// Pseudo header: src(16) dst(16) upper-len(4) zeros(3) next(1)
+		var pseudo [40]byte
+		copy(pseudo[0:16], out[8:24])   // src
+		copy(pseudo[16:32], out[24:40]) // dst
+		pseudo[32] = byte(uint32(tcpLen) >> 24)
+		pseudo[33] = byte(uint32(tcpLen) >> 16)
+		pseudo[34] = byte(uint32(tcpLen) >> 8)
+		pseudo[35] = byte(uint32(tcpLen))
+		// pseudo[36..38] left as zero
+		pseudo[39] = 6 // TCP
+
+		sum := sum16(pseudo[:]) + sum16(out[tcpStart:])
+		cs := finalize(sum)
+		out[tcpStart+16] = byte(cs >> 8)
+		out[tcpStart+17] = byte(cs)
+
+		// (No IPv6 header checksum)
+		return out, true
+	}
+
+	// ---------- IPv{4,6} / fallback via gopacket ----------
+	try := func(first gopacket.LayerType) ([]byte, bool) {
+		// Parse the packet (IPv4 or IPv6) using the generic decoder.
+		p := gopacket.NewPacket(raw, first, gopacket.Default)
+		if p.ErrorLayer() != nil {
+			return nil, false
+		}
+
+		// Find IP and TCP layers
+		var ipL gopacket.SerializableLayer
+		var ip4 layers.IPv4
+		var ip6 layers.IPv6
+
+		if l := p.Layer(layers.LayerTypeIPv4); l != nil {
+			ip4 = *l.(*layers.IPv4)
+			ipL = &ip4
+		} else if l := p.Layer(layers.LayerTypeIPv6); l != nil {
+			ip6 = *l.(*layers.IPv6)
+			ipL = &ip6
+		} else {
+			return nil, false
+		}
+
+		tl := p.Layer(layers.LayerTypeTCP)
+		if tl == nil {
+			return nil, false
+		}
+		tcph := *(tl.(*layers.TCP)) // editable copy
+
+		// No change needed? bail out (signals "unchanged")
+		if tcph.Window == win {
+			return raw, false
+		}
+		tcph.Window = win
+
+		// Wire up checksums for re-serialize
 		switch v := ipL.(type) {
 		case *layers.IPv4:
 			v.Length, v.Checksum = 0, 0
-			_ = tcp.SetNetworkLayerForChecksum(v)
+			_ = tcph.SetNetworkLayerForChecksum(v)
 		case *layers.IPv6:
 			v.Length = 0
-			_ = tcp.SetNetworkLayerForChecksum(v)
+			_ = tcph.SetNetworkLayerForChecksum(v)
+		}
+
+		// Preserve app payload (extensions may be dropped on re-serialize — OK)
+		var app []byte
+		if al := p.ApplicationLayer(); al != nil {
+			app = al.Payload()
 		}
 
 		buf := gopacket.NewSerializeBuffer()
 		opts := gopacket.SerializeOptions{FixLengths: true, ComputeChecksums: true}
-		if err := gopacket.SerializeLayers(buf, opts, ipL, &tcp, app); err != nil {
+		if err := gopacket.SerializeLayers(buf, opts, ipL, &tcph, gopacket.Payload(app)); err != nil {
 			return nil, false
 		}
 		return buf.Bytes(), true
@@ -372,6 +426,25 @@ func overrideTCPWindow(raw []byte, win uint16) ([]byte, bool) {
 		return out, true
 	}
 	return raw, false
+}
+
+// --- tiny checksum helpers (used by IPv6 fast path) ---
+func sum16(b []byte) uint32 {
+	var s uint32
+	for i := 0; i+1 < len(b); i += 2 {
+		s += uint32(b[i])<<8 | uint32(b[i+1])
+	}
+	if len(b)%2 == 1 {
+		s += uint32(b[len(b)-1]) << 8
+	}
+	return s
+}
+
+func finalize(s uint32) uint16 {
+	for s>>16 != 0 {
+		s = (s & 0xFFFF) + (s >> 16)
+	}
+	return ^uint16(s)
 }
 
 // --- 16-bit one's complement add (carry wrap) ---

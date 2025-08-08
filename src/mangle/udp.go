@@ -54,10 +54,6 @@ func portAllowed(sec *config.Section, p layers.UDPPort) bool {
 	return false
 }
 
-func looksLikeQUIC(payload []byte) bool {
-	return len(payload) >= 1200 && payload[0]&0xC0 == 0xC0
-}
-
 func udpFiltered(sec *config.Section, udp *layers.UDP, payload []byte) bool {
 	// QUIC filter first (unless dport filter is on and port != 443)
 	if sec.UDPFilterQuic != config.UDPFilterQuicDisabled {

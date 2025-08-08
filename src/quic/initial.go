@@ -23,47 +23,77 @@ const (
 	versionV2 = 0x6b3343cf
 )
 
-func DecryptInitial(dcid []byte, packet []byte) ([]byte, bool) {
-	if !IsInitial(packet) {
+func DecryptInitial(dcid, packet []byte) ([]byte, bool) {
+	if len(packet) < 7 || packet[0]&0x80 == 0 {
 		return nil, false
-	}
-
+	} // long header
 	ver := binary.BigEndian.Uint32(packet[1:5])
 	hp, aead, iv, err := deriveInitial(dcid, ver)
 	if err != nil {
 		return nil, false
 	}
-	if len(packet) < 7 {
-		return nil, false
-	}
+
+	// flags(1) + version(4)
 	off := 1 + 4
-	dcidLen := int(packet[5])
-	off += 1 + dcidLen
+
+	// DCID Len + DCID
 	if len(packet) < off+1 {
 		return nil, false
 	}
-	scidLen := int(packet[off])
-	off += 1 + scidLen
-	if len(packet) < off+1 {
+	dlen := int(packet[off])
+	off++
+	if len(packet) < off+dlen+1 {
 		return nil, false
+	}
+	off += dlen
+
+	// SCID Len + SCID
+	slen := int(packet[off])
+	off++
+	if len(packet) < off+slen {
+		return nil, false
+	}
+	off += slen
+
+	// Token Length (varint) + Token
+	tlen, n := readVar(packet[off:])
+	if n == 0 || len(packet) < off+n+int(tlen) {
+		return nil, false
+	}
+	off += n + int(tlen)
+
+	// Length (varint)
+	_, m := readVar(packet[off:])
+	if m == 0 {
+		return nil, false
+	}
+	pnOffset := off + m
+
+	// RFC 9001 §5.4.2: sample starts 4 bytes after pn_offset
+	if pnOffset+4+16 > len(packet) {
+		return nil, false
+	}
+	sample := packet[pnOffset+4 : pnOffset+4+16]
+
+	mask := make([]byte, 16)
+	hp.Encrypt(mask, sample)
+
+	// unmask header + pn
+	if packet[0]&0x80 != 0 {
+		packet[0] ^= mask[0] & 0x0f
+	} else {
+		packet[0] ^= mask[0] & 0x1f
 	}
 	pnLen := int((packet[0] & 0x03) + 1)
-	pnOffset := off
-	sampleOffset := pnOffset + 4
-	if sampleOffset+16 > len(packet) {
-		return nil, false
-	}
-	mask := make([]byte, 16)
-	hp.Encrypt(mask, packet[sampleOffset:sampleOffset+16])
-	packet[0] ^= mask[0] & 0x0f
-	pnLen = int((packet[0] & 0x03) + 1)
 	for i := 0; i < pnLen; i++ {
 		packet[pnOffset+i] ^= mask[i+1]
 	}
-	pn := packet[pnOffset : pnOffset+pnLen]
+
+	// build nonce = iv XOR pn
 	for i := 0; i < pnLen; i++ {
-		iv[ivSize-pnLen+i] ^= pn[i]
+		iv[ivSize-pnLen+i] ^= packet[pnOffset+i]
 	}
+
 	associated := packet[:pnOffset+pnLen]
 	ciphertext := packet[pnOffset+pnLen:]
 	plain, err := aead.Open(nil, iv, ciphertext, associated)
@@ -139,22 +169,20 @@ func hkdfExtractSHA256(salt, ikm []byte) []byte {
 // the TLS handshake byte stream from CRYPTO frames (type 0x06).
 // It tolerates PADDING (0x00) and stops on unknown frames.
 func AssembleCrypto(plain []byte) ([]byte, bool) {
-	// start modest; grow as needed
 	buf := make([]byte, 16384)
 	payload := plain
-
 	for len(payload) > 0 {
 		ftype, n := readVar(payload)
 		if n == 0 {
 			return nil, false
 		}
 		payload = payload[n:]
-
 		switch ftype {
-		case 0x00: // PADDING (RFC 9000 §19.1)
-			// single-byte, no length
+		case 0x00: // PADDING
 			continue
-		case 0x06: // CRYPTO (RFC 9000 §19.6)
+		case 0x01: // PING (tolerate like C)
+			continue
+		case 0x06: // CRYPTO
 			off, m := readVar(payload)
 			if m == 0 {
 				return nil, false
@@ -167,7 +195,6 @@ func AssembleCrypto(plain []byte) ([]byte, bool) {
 			if len(payload) < dataStart+int(l) {
 				return nil, false
 			}
-
 			end := int(off) + int(l)
 			if end > len(buf) {
 				nb := make([]byte, end)
@@ -176,9 +203,7 @@ func AssembleCrypto(plain []byte) ([]byte, bool) {
 			}
 			copy(buf[int(off):end], payload[dataStart:dataStart+int(l)])
 			payload = payload[dataStart+int(l):]
-
 		default:
-			// Unknown frame in Initial: stop (matches C behavior).
 			return buf, true
 		}
 	}

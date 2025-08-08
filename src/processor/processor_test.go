@@ -8,74 +8,70 @@ import (
 	nfqueue "github.com/florianl/go-nfqueue"
 )
 
-/*
-   Test matrix
+func TestCallback_SkipOwnMark(t *testing.T) {
+	cfg := &config.Config{Mark: 1 << 15}
+	cb := New(cfg)
 
-   ┌────────────┬──────────┬─────────┐
-   │ case       │ mark?    │ payload │ expected verdict │
-   ├────────────┼──────────┼─────────┼──────────────────┤
-   │ LoopSkip   │ yes      │ any     │ ACCEPT           │
-   │ EmptyPay   │ no       │ empty   │ ACCEPT           │
-   │ mangleDrop │ no       │ non‑nil │ DROP (stub)      │
-   │ manglePass │ no       │ non‑nil │ ACCEPT (stub)    │
-   └────────────┴──────────┴─────────┴──────────────────┘
-*/
-
-func TestCallback_VerdictMatrix(t *testing.T) {
-	// shared fixtures
-	cfg := config.DefaultConfig
-	payload := []byte{0x01, 0x02}
-
-	// helpers
-	makeAttr := func(markSet bool, pay []byte) *nfqueue.Attribute {
-		var attr nfqueue.Attribute
-		if markSet {
-			mark := uint32(cfg.Mark)
-			attr.Mark = &mark
-		}
-		if pay != nil {
-			attr.Payload = &pay
-		}
-		return &attr
+	mark := uint32(cfg.Mark)
+	a := &nfqueue.Attribute{Mark: &mark}
+	if v := cb(a); v != nfqueue.NfAccept {
+		t.Fatalf("got verdict %d want NfAccept", v)
 	}
+}
 
-	//------------------------------------------------------------------
-	// 1) Loop‑protection: mark already present → ACCEPT
-	//------------------------------------------------------------------
-	cb := New(&cfg)
-	if v := cb(makeAttr(true, payload)); v != nfqueue.NfAccept {
-		t.Fatalf("LoopSkip: verdict=%d want NfAccept", v)
+func TestCallback_EmptyPayload(t *testing.T) {
+	cfg := &config.Config{}
+	cb := New(cfg)
+
+	empty := []byte{}
+	a := &nfqueue.Attribute{Payload: &empty}
+	if v := cb(a); v != nfqueue.NfAccept {
+		t.Fatalf("got verdict %d want NfAccept", v)
 	}
+}
 
-	//------------------------------------------------------------------
-	// 2) Empty payload → ACCEPT
-	//------------------------------------------------------------------
-	if v := cb(makeAttr(false, nil)); v != nfqueue.NfAccept {
-		t.Fatalf("EmptyPay: verdict=%d want NfAccept", v)
+func TestCallback_ConntrackThreshold(t *testing.T) {
+	cfg := &config.Config{ConnBytesLimit: 2}
+	cb := New(cfg)
+
+	// craft NFQA_CT with CTA_COUNTERS_ORIG.packets = 3 (exceeds limit)
+	ct := encCtOrigPackets64(3)
+	payload := []byte{0x01} // non-empty to avoid early accept path
+	a := &nfqueue.Attribute{Ct: &ct, Payload: &payload}
+
+	if v := cb(a); v != nfqueue.NfAccept {
+		t.Fatalf("got verdict %d want NfAccept due to conntrack threshold", v)
 	}
+}
 
-	//------------------------------------------------------------------
-	// 3 & 4) Force processPacket to return DROP then ACCEPT
-	//------------------------------------------------------------------
-	original := processPacket
-	defer func() { processPacket = original }() // restore after test
+func TestCallback_ProcessPacketDrop(t *testing.T) {
+	// stub processPacket to return VerdictDrop
+	orig := processPacket
+	processPacket = func(_ *config.Config, _ []byte) mangle.Verdict { return mangle.VerdictDrop }
+	t.Cleanup(func() { processPacket = orig })
 
-	tests := []struct {
-		name     string
-		stubVerd mangle.Verdict
-		want     int
-	}{
-		{"mangleDrop", mangle.VerdictDrop, nfqueue.NfDrop},
-		{"manglePass", mangle.VerdictAccept, nfqueue.NfAccept},
+	cfg := &config.Config{}
+	cb := New(cfg)
+
+	pl := []byte{0xaa}
+	a := &nfqueue.Attribute{Payload: &pl}
+	if v := cb(a); v != nfqueue.NfDrop {
+		t.Fatalf("got verdict %d want NfDrop", v)
 	}
+}
 
-	for _, tc := range tests {
-		processPacket = func(*config.Config, []byte) mangle.Verdict {
-			return tc.stubVerd
-		}
-		cb := New(&cfg)
-		if got := cb(makeAttr(false, payload)); got != tc.want {
-			t.Fatalf("%s: verdict=%d want %d", tc.name, got, tc.want)
-		}
+func TestCallback_ProcessPacketAccept(t *testing.T) {
+	// stub to Accept (by returning VerdictContinue)
+	orig := processPacket
+	processPacket = func(_ *config.Config, _ []byte) mangle.Verdict { return mangle.VerdictContinue }
+	t.Cleanup(func() { processPacket = orig })
+
+	cfg := &config.Config{}
+	cb := New(cfg)
+
+	pl := []byte{0xbb}
+	a := &nfqueue.Attribute{Payload: &pl}
+	if v := cb(a); v != nfqueue.NfAccept {
+		t.Fatalf("got verdict %d want NfAccept", v)
 	}
 }

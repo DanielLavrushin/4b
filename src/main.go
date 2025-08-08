@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/daniellavrushin/b4/cli"
 	"github.com/daniellavrushin/b4/config"
@@ -33,6 +34,25 @@ func main() {
 			return raw6(pkt)
 		}
 		return raw4(pkt)
+	})
+
+	mangle.SetDelayedSendFunc(func(pkt []byte, delayMs uint) error {
+		// choose the correct raw socket based on IP version
+		send := raw4
+		if mangle.IPVersion(pkt) == 6 {
+			// honor --no-ipv6 just like the C tool (don’t attempt v6 sends)
+			if !cfg.UseIPv6 {
+				return nil
+			}
+			send = raw6
+		}
+
+		if delayMs == 0 {
+			return send(pkt)
+		}
+		// schedule the send; AfterFunc runs the callback on its own goroutine
+		time.AfterFunc(time.Duration(delayMs)*time.Millisecond, func() { _ = send(pkt) })
+		return nil
 	})
 
 	//------------------------------------------------------------

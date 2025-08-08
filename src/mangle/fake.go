@@ -38,6 +38,7 @@ type fakeType struct {
 	TTL         uint8  // for TTL
 	Payload     []byte // data to inject (already chosen by caller)
 	Seg2Delay   uint   // delay of the *real* second fragment
+	WinOverride uint16 // window size override
 }
 
 func (ft fakeType) iterateStrategies(fn func(int)) {
@@ -67,6 +68,10 @@ func buildFake(pktTemplate *layers.TCP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 
 	if flag&fakeStratTCPCheck != 0 {
 		tcp.Urgent++ // minimal checksum disturbance
+	}
+
+	if ft.WinOverride > 0 {
+		tcp.Window = ft.WinOverride
 	}
 
 	var ipL gopacket.SerializableLayer
@@ -133,6 +138,7 @@ func fakeTypeFromSection(sec *config.Section) fakeType {
 		TTL:         sec.FakingTTL,
 		Payload:     sec.FakeSNIPkt,
 		Seg2Delay:   sec.Seg2Delay,
+		WinOverride: uint16(sec.FKWinSize),
 	}
 }
 

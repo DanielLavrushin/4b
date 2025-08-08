@@ -3,6 +3,7 @@ package mangle
 import (
 	"encoding/binary"
 	"net"
+	"reflect"
 	"testing"
 
 	"github.com/daniellavrushin/b4/config"
@@ -187,5 +188,56 @@ func TestBuildFakeUDP_IPv6_HopLimitAndLengths(t *testing.T) {
 	}
 	if int(u.Length) != 8+32 {
 		t.Fatalf("UDP length=%d, want %d", u.Length, 40)
+	}
+}
+
+func TestUDPFilter_QuicParsed_OverridesPortRange(t *testing.T) {
+	// stub the QUIC pieces so we don't depend on real packets
+	origIs, origDec, origAsm, origTLS := quicIsInitial, quicDecryptInitial, quicAssembleCrypto, tlsExtractSNI
+	quicIsInitial = func(_ []byte) bool { return true }
+	quicDecryptInitial = func(_ []byte, _ []byte) ([]byte, bool) { return []byte("plain"), true }
+	quicAssembleCrypto = func(_ []byte) ([]byte, bool) { return []byte("...example.com..."), true }
+	tlsExtractSNI = func(_ []byte) ([]byte, error) { return []byte("example.com"), nil }
+	t.Cleanup(func() {
+		quicIsInitial = origIs
+		quicDecryptInitial = origDec
+		quicAssembleCrypto = origAsm
+		tlsExtractSNI = origTLS
+	})
+
+	sec := &config.Section{
+		UDPFilterQuic: config.UDPFilterQuicParsed,
+		SNIDetection:  0, // parse mode
+		SNIDomains:    []string{"example.com"},
+	}
+
+	// --- set UDPDPortRange to a range that does NOT include 443 ---
+	// We don't know the concrete (unexported) type of the slice elements,
+	// so build it via reflect.
+	rv := reflect.ValueOf(sec).Elem().FieldByName("UDPDPortRange")
+	if !rv.IsValid() || rv.Kind() != reflect.Slice {
+		t.Fatalf("UDPDPortRange field not found or not a slice")
+	}
+	elemT := rv.Type().Elem() // the unexported struct type
+	// new element: {Start: 20000, End: 20010}
+	elem := reflect.New(elemT).Elem()
+	startField := elem.FieldByName("Start")
+	endField := elem.FieldByName("End")
+	if !startField.IsValid() || !endField.IsValid() {
+		t.Fatalf("UDPDPortRange element missing Start/End fields")
+	}
+	startField.SetUint(20000)
+	endField.SetUint(20010)
+	// set the slice with one element
+	slice := reflect.MakeSlice(rv.Type(), 1, 1)
+	slice.Index(0).Set(elem)
+	rv.Set(slice)
+
+	udp := &layers.UDP{DstPort: 443}
+	// minimal bytes: long-header + v1 + dcidLen=0 + filler
+	payload := []byte{0x80, 0, 0, 0, 1, 0, 0}
+
+	if !udpFiltered(sec, udp, payload) {
+		t.Fatalf("QUIC parsed match should override numeric dport ranges")
 	}
 }

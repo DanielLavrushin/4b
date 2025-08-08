@@ -154,11 +154,11 @@ var DefaultConfig = Config{
 }
 
 func NewSection(id int) *Section {
-    s := DefaultSection      // copy
-    s.ID = id
-    s.prev, s.next = nil, nil
-    s.ensureFakePayload()
-    return &s
+	s := DefaultSection // copy
+	s.ID = id
+	s.prev, s.next = nil, nil
+	s.ensureFakePayload()
+	return &s
 }
 
 func (c *Config) Sections() []*Section {
@@ -193,8 +193,10 @@ func (s *Section) MatchesSNI(host string) bool {
 }
 
 func hexToBytes(hexStr string) ([]byte, error) {
-    if len(hexStr)%2 != 0 { return nil, fmt.Errorf("odd hex length") }
-    out := make([]byte, len(hexStr)/2)
-    _, err := hex.Decode(out, []byte(hexStr))
-    return out, err
+	if len(hexStr)%2 != 0 {
+		return nil, fmt.Errorf("odd hex length")
+	}
+	out := make([]byte, len(hexStr)/2)
+	_, err := hex.Decode(out, []byte(hexStr))
+	return out, err
 }

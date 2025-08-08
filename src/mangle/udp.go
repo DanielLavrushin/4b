@@ -5,8 +5,6 @@ import (
 	"time"
 
 	"github.com/daniellavrushin/b4/config"
-	"github.com/daniellavrushin/b4/quic"
-	"github.com/daniellavrushin/b4/tls"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 )
@@ -55,45 +53,16 @@ func portAllowed(sec *config.Section, p layers.UDPPort) bool {
 }
 
 func udpFiltered(sec *config.Section, udp *layers.UDP, payload []byte) bool {
+
 	// QUIC filter first (unless dport filter is on and port != 443)
 	if sec.UDPFilterQuic != config.UDPFilterQuicDisabled {
 		if !(sec.DPortFilter && uint16(udp.DstPort) != 443) {
-			// Must be a long-header Initial in v1/v2, otherwise skip
-			if quic.IsInitial(payload) {
-				if sec.UDPFilterQuic == config.UDPFilterQuicAll {
-					return true
-				}
-
-				// Parsed mode: decrypt → assemble CRYPTO → parse TLS CH → match SNI
-				// Make a scratch copy; DecryptInitial mutates the header bytes.
-				buf := make([]byte, len(payload))
-				copy(buf, payload)
-
-				// dcid is at buf[6 : 6+dcidLen]
-				if len(buf) >= 6 {
-					dlen := int(buf[5])
-					if 6+dlen <= len(buf) {
-						dcid := buf[6 : 6+dlen]
-						if plain, ok := quic.DecryptInitial(dcid, buf); ok {
-							if crypto, ok := quic.AssembleCrypto(plain); ok {
-								if sec.SNIDetection == 1 { // brute
-									v := tls.ScanTLSPayload(&tls.Section{
-										BruteForce: true,
-										SNIs:       nil, // not needed just to pull SNI
-										Exclude:    nil,
-									}, crypto)
-									if v.SNILen > 0 && sec.MatchesSNI(string(v.SNIPtr[:v.SNILen])) {
-										return true
-									}
-								} else {
-									if host, err := tls.ExtractSNI(crypto); err == nil && len(host) > 0 && sec.MatchesSNI(string(host)) {
-										return true
-									}
-								}
-							}
-						}
-					}
-				}
+			// Must be Initial. "All": accept Initials; "Parsed": decrypt and match SNI.
+			if sec.UDPFilterQuic == config.UDPFilterQuicAll {
+				return quicIsInitial(payload)
+			}
+			if sec.UDPFilterQuic == config.UDPFilterQuicParsed {
+				return quicParsedMatch(sec, udp, payload)
 			}
 		}
 	}

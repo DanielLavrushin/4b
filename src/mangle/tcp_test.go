@@ -1,3 +1,4 @@
+// mangle/tcp_test.go
 package mangle
 
 import (
@@ -9,152 +10,158 @@ import (
 	"github.com/google/gopacket/layers"
 )
 
-/* -----------------------------------------------------------------------
-   lightweight stubs wired through the indirection variables
------------------------------------------------------------------------ */
+// --- helpers -------------------------------------------------------------
 
-var (
-	rawCalls     [][]byte
-	delayedCalls []struct {
-		pkt   []byte
-		delay uint
-	}
-)
-
-func initTestStubs() func() {
-	//------------------------------------------------------------------
-	// 1) keep originals
-	//------------------------------------------------------------------
-	origSendRaw, origSendDelayed := sendRaw, sendDelayed
-	origExtractSNI := extractSNI
-	origFakeSeq := sendFakeSeq
-	origIP4Frag := ip4FragFn
-	origTCPFrag := tcpFragFn
-
-	//------------------------------------------------------------------
-	// 2) wipe previous state
-	//------------------------------------------------------------------
-	rawCalls = nil     // <‑‑ ADD
-	delayedCalls = nil // <‑‑ ADD
-
-	//------------------------------------------------------------------
-	// 3) install stubs
-	//------------------------------------------------------------------
-	sendRaw = func(b []byte) error { rawCalls = append(rawCalls, b); return nil }
-	sendDelayed = func(b []byte, d uint) error {
-		delayedCalls = append(delayedCalls, struct {
-			pkt   []byte
-			delay uint
-		}{append([]byte(nil), b...), d})
-		return nil
-	}
-	extractSNI = func(_ []byte) ([]byte, error) { return []byte("example.com"), nil }
-	sendFakeSeq = func(_ fakeType, _ *layers.TCP, _ *layers.IPv4, _ *layers.IPv6) {}
-	ip4FragFn = func(_ []byte, _ int) ([]byte, []byte, error) { return nil, nil, nil }
-	tcpFragFn = func(_ []byte, _ int) ([]byte, []byte, error) { return nil, nil, nil }
-
-	//------------------------------------------------------------------
-	// 4) restore helper
-	//------------------------------------------------------------------
-	return func() {
-		sendRaw, sendDelayed = origSendRaw, origSendDelayed
-		extractSNI = origExtractSNI
-		sendFakeSeq = origFakeSeq
-		ip4FragFn, tcpFragFn = origIP4Frag, origTCPFrag
-	}
-}
-
-/* -----------------------------------------------------------------------
-   helpers to craft a minimal IPv4/TCP ClientHello that contains "example.com"
------------------------------------------------------------------------ */
-
-func buildPacket() (tcp *layers.TCP, ip *layers.IPv4, payload gopacket.Payload, full []byte) {
-	ip = &layers.IPv4{
+func buildRawIPv4TCP(win uint16, payload []byte) []byte {
+	ip := &layers.IPv4{
 		Version:  4,
 		IHL:      5,
+		TTL:      64,
 		SrcIP:    net.IP{10, 0, 0, 1},
 		DstIP:    net.IP{10, 0, 0, 2},
 		Protocol: layers.IPProtocolTCP,
 	}
-	tcp = &layers.TCP{
-		SrcPort: 12345,
-		DstPort: 443,
-		Seq:     1000,
-		ACK:     false,
-		SYN:     false,
+	tcp := &layers.TCP{
+		SrcPort: 12345, DstPort: 443,
+		Seq: 1000, ACK: true,
+		DataOffset: 5,
+		Window:     win,
 	}
 	tcp.SetNetworkLayerForChecksum(ip)
-	// payload contains the SNI so bytes.Index finds it
-	payloadBytes := []byte("aaaexample.combbb")
-	payload = gopacket.Payload(payloadBytes)
 
 	buf := gopacket.NewSerializeBuffer()
-	_ = gopacket.SerializeLayers(buf,
-		gopacket.SerializeOptions{ComputeChecksums: true, FixLengths: true},
-		ip, tcp, payload)
-	full = buf.Bytes()
-	return
+	opts := gopacket.SerializeOptions{FixLengths: true, ComputeChecksums: true}
+	_ = gopacket.SerializeLayers(buf, opts, ip, tcp, gopacket.Payload(payload))
+	return buf.Bytes()
 }
 
-/* -----------------------------------------------------------------------
-   the test itself
------------------------------------------------------------------------ */
+func decodeTCPv4(raw []byte) (*layers.IPv4, *layers.TCP, []byte) {
+	p := gopacket.NewPacket(raw, layers.LayerTypeIPv4, gopacket.Default)
+	ip := p.Layer(layers.LayerTypeIPv4).(*layers.IPv4)
+	tcp := p.Layer(layers.LayerTypeTCP).(*layers.TCP)
+	var app []byte
+	if ap := p.ApplicationLayer(); ap != nil {
+		app = ap.Payload()
+	}
+	return ip, tcp, app
+}
 
-func TestProcessTCP_SplitsAndDrops(t *testing.T) {
-	restore := initTestStubs()
-	defer restore()
+// --- tests ---------------------------------------------------------------
 
-	// 1) craft packet layers
-	tcp, ip, payload, full := buildPacket()
+func TestSendAlteredSyn_WindowOverride(t *testing.T) {
+	// capture the single send
+	var sent [][]byte
+	origSend := sendRaw
+	sendRaw = func(b []byte) error { sent = append(sent, b); return nil }
+	t.Cleanup(func() { sendRaw = origSend })
 
-	// 2) section that matches "example.com" and asks for TCP fragmentation
-	sec := config.NewSection(0)
-	sec.SNIDomains = []string{"example.com"}
-	sec.FragmentationStrategy = config.FragStratTCP
-	sec.TLSEnabled = true
-	sec.FragSNIReverse = false
-	sec.DPortFilter = true // still allow dst 443
+	sec := &config.Section{
+		SynFake:   true,
+		FKWinSize: 4096,
+		// choose any non-empty payload for SYN fake
+		FakeSNIPkt: []byte("hello"),
+	}
 
-	// 3) run
-	verdict := processTCP(tcp, ip, nil, payload, sec, full)
+	ip4 := &layers.IPv4{Version: 4, IHL: 5, TTL: 64, Protocol: layers.IPProtocolTCP,
+		SrcIP: net.IP{1, 1, 1, 1}, DstIP: net.IP{2, 2, 2, 2}}
+	tcp := &layers.TCP{SrcPort: 10000, DstPort: 443, SYN: true, DataOffset: 5, Window: 123}
+
+	verdict := sendAlteredSyn(tcp, ip4, nil, sec)
 	if verdict != VerdictDrop {
-		t.Fatalf("want VerdictDrop, got %v", verdict)
+		t.Fatalf("verdict=%v want Drop", verdict)
 	}
-
-	// 4) we expect exactly two real sends (pkt1, pkt2) and maybe fake seq
-	if len(rawCalls) != 2 {
-		t.Fatalf("expected 2 sendRaw calls, got %d", len(rawCalls))
+	if len(sent) != 1 {
+		t.Fatalf("sent=%d packets, want 1", len(sent))
 	}
-	if len(delayedCalls) != 0 {
-		t.Fatalf("expected 0 sendDelayed calls, got %d", len(delayedCalls))
+	_, tt, _ := decodeTCPv4(sent[0])
+	if tt.Window != 4096 {
+		t.Fatalf("tcp.window=%d want 4096", tt.Window)
 	}
 }
 
-/* -----------------------------------------------------------------------
-   sanity check for sendAlteredSyn()
------------------------------------------------------------------------ */
+func TestProcessTCP_WindowOverrideOnForgedSegments(t *testing.T) {
+	// stub raw sender & SNI extractor
+	var sent [][]byte
+	origSend := sendRaw
+	sendRaw = func(b []byte) error { sent = append(sent, b); return nil }
+	t.Cleanup(func() { sendRaw = origSend })
 
-func TestSendAlteredSyn_UsesSendRaw(t *testing.T) {
-	restore := initTestStubs()
-	defer restore()
+	origExtract := extractSNI
+	extractSNI = func(_ []byte) ([]byte, error) { return []byte("example.com"), nil }
+	t.Cleanup(func() { extractSNI = origExtract })
 
-	sec := config.NewSection(0)
-	sec.SynFake = true
-	sec.FakeSNIPkt = []byte{0xde, 0xad, 0xbe, 0xef}
-
-	// minimal IPv4 SYN
-	ip := &layers.IPv4{
-		Version: 4, IHL: 5, TTL: 64, Protocol: layers.IPProtocolTCP,
-		SrcIP: net.IP{1, 1, 1, 1}, DstIP: net.IP{2, 2, 2, 2},
+	sec := &config.Section{
+		// ensure we actually do TLS split path
+		TLSEnabled:            true,
+		FKWinSize:             2048,
+		SNIDomains:            []string{"example.com"},
+		FragmentationStrategy: config.FragStratNone,
+		Seg2Delay:             0,
+		FakeSNI:               false,
+		FakeSNISeqLen:         0,
+		FakingStrategy:        0,
 	}
-	tcp := &layers.TCP{SYN: true, DstPort: 443}
-	tcp.SetNetworkLayerForChecksum(ip)
 
-	vd := sendAlteredSyn(tcp, ip, nil, sec)
-	if vd != VerdictDrop {
-		t.Fatalf("want VerdictDrop, got %v", vd)
+	ip4 := &layers.IPv4{Version: 4, IHL: 5, TTL: 64, Protocol: layers.IPProtocolTCP,
+		SrcIP: net.IP{10, 0, 0, 3}, DstIP: net.IP{10, 0, 0, 4}}
+	tcp := &layers.TCP{
+		SrcPort: 1111, DstPort: 443,
+		Seq: 5000, ACK: true,
+		DataOffset: 5,
+		Window:     100,
 	}
-	if len(rawCalls) != 1 {
-		t.Fatalf("sendAlteredSyn should emit exactly 1 packet, got %d", len(rawCalls))
+
+	// include SNI in payload so split point is stable
+	payload := gopacket.Payload([]byte("XXXXexample.comYYYY"))
+
+	v := processTCP(tcp, ip4, nil, payload, sec, nil)
+	if v != VerdictDrop {
+		t.Fatalf("verdict=%v want Drop", v)
+	}
+	if len(sent) != 2 {
+		t.Fatalf("sent %d packets, want 2 (first/second forged)", len(sent))
+	}
+	for i, b := range sent {
+		_, tt, _ := decodeTCPv4(b)
+		if tt.Window != 2048 {
+			t.Fatalf("pkt[%d] tcp.window=%d want 2048", i, tt.Window)
+		}
+	}
+}
+
+func TestSendFrags_OverridesTCPWindow(t *testing.T) {
+	var sent [][]byte
+	origSend := sendRaw
+	sendRaw = func(b []byte) error { sent = append(sent, b); return nil }
+	t.Cleanup(func() { sendRaw = origSend })
+
+	// stub fake sequence to avoid touching nil headers
+	origFake := sendFakeSeq
+	sendFakeSeq = func(_ fakeType, _ *layers.TCP, _ *layers.IPv4, _ *layers.IPv6) {}
+	t.Cleanup(func() { sendFakeSeq = origFake })
+
+	sec := &config.Section{
+		FKWinSize:      7777,
+		Seg2Delay:      0,
+		FragSNIReverse: false,
+		// ensure no other fakes are triggered
+		FakingStrategy: 0,
+		FakeSNI:        false,
+	}
+
+	a := buildRawIPv4TCP(1000, []byte("AAA"))
+	b := buildRawIPv4TCP(2000, []byte("BBB"))
+
+	// dvs=0 is fine for this test, tcp/ip are irrelevant
+	sendFrags(sec, a, b, 0, nil, nil, nil)
+
+	if len(sent) != 2 {
+		t.Fatalf("sent %d packets, want 2", len(sent))
+	}
+	for i, pkt := range sent {
+		_, tt, _ := decodeTCPv4(pkt)
+		if tt.Window != 7777 {
+			t.Fatalf("pkt[%d] tcp.window=%d want 7777", i, tt.Window)
+		}
 	}
 }

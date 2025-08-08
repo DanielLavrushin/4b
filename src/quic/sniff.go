@@ -1,10 +1,12 @@
 package quic
 
-import "errors"
+import (
+	"encoding/binary"
+	"errors"
+)
 
 const (
-	longHdrBit  = 0x80
-	initialType = 0x00 // packet‑type bits == Initial after shift
+	longHdrBit = 0x80
 )
 
 // readVar decodes a QUIC variable‑length integer and returns (value, bytesRead).
@@ -28,8 +30,20 @@ func IsInitial(b []byte) bool {
 	if len(b) < 7 || b[0]&longHdrBit == 0 { // short header or tiny packet
 		return false
 	}
-	ptype := (b[0] & 0x30) >> 4 // bits 4–5
-	return ptype == initialType
+	ptype := (b[0] & 0x30) >> 4 // bits 4–5 (version-specific meaning)
+	ver := binary.BigEndian.Uint32(b[1:5])
+	switch ver {
+	case versionV1:
+		// v1: Initial = 0b00
+		return ptype == 0x00
+	case versionV2:
+		// RFC 9369 §3.2: v2 long-header mapping:
+		// Initial=0b01, 0-RTT=0b10, Handshake=0b11, Retry=0b00
+		// Normalize: treat 0b01 as Initial
+		return ptype == 0x01
+	default:
+		return false
+	}
 }
 
 func cidLens(b []byte) (dstLen, srcLen int, off int, err error) {

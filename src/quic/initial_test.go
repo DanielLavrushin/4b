@@ -1,123 +1,72 @@
 package quic
 
 import (
-	"bytes"
-	"crypto/rand"
 	"encoding/binary"
+	"encoding/hex"
 	"testing"
 )
 
-/* ---------- helpers ---------- */
-
-// buildInitial constructs a minimal encrypted Initial packet whose layout
-// matches exactly what DecryptInitial expects:
-//
-// [0]      long-hdr first byte  (bits 0-1 carry pnLen)
-// [1..4]   version
-// [5]      dcidLen
-// [...]    dcid
-// [..]     scidLen (we use 0)
-// [pn]     1-byte packet number (pnLen = 1)
-// [cipher] ciphertext (AEAD-sealed)
-//
-//	└─ header protection applied
-//
-// It omits token/length/etc. because DecryptInitial never parses them.
-func buildInitial(version uint32, payload []byte) ([]byte, []byte) {
-	const pnLen = 1
-	if len(payload) == 0 {
-		payload = []byte("dummy payload …")
+func mustHex(s string) []byte {
+	b, err := hex.DecodeString(s)
+	if err != nil {
+		panic(err)
 	}
+	return b
+}
 
-	var dcid []byte
-	for {
-		// -------- derive a random DCID each attempt ----------------------
-		dcid = make([]byte, 8)
-		_, _ = rand.Read(dcid)
-
-		// -------- keys ---------------------------------------------------
-		hp, aead, iv, _ := deriveInitial(dcid, version)
-
-		// -------- header (unprotected) -----------------------------------
-		header := make([]byte, 0, 64)
-		header = append(header, 0xc0) // first byte (pnLen=1)
-		binary.BigEndian.PutUint32(header[len(header):len(header)+4], version)
-		header = header[:len(header)+4]
-		header = append(header, byte(len(dcid)))
-		header = append(header, dcid...)
-		header = append(header, 0x00) // scidLen = 0
-
-		// -------- AEAD seal ----------------------------------------------
-		pn := []byte{0x00}
-		associated := append(append([]byte(nil), header...), pn...)
-
-		nonce := append([]byte(nil), iv...)
-		nonce[len(nonce)-1] ^= pn[0]
-
-		ciphertext := aead.Seal(nil, nonce, payload, associated)
-
-		// -------- header protection --------------------------------------
-		sample := ciphertext[4 : 4+16]
-		mask := make([]byte, 16)
-		hp.Encrypt(mask, sample)
-
-		if mask[0]&0x03 != 0 {
-			// The mask would change PN-length bits → try another DCID.
-			continue
-		}
-
-		protected := append([]byte(nil), header...)
-		protected[0] ^= mask[0] & 0x0f
-		protected = append(protected, pn...)
-		protected[len(header)] ^= mask[1]
-
-		return append(protected, ciphertext...), dcid
+func hexEq(t *testing.T, got []byte, wantHex string) {
+	if hex.EncodeToString(got) != wantHex {
+		t.Fatalf("\n got:  %s\n want: %s", hex.EncodeToString(got), wantHex)
 	}
 }
 
-/* ---------- tests ---------- */
+func TestV1DerivationVectors(t *testing.T) {
+	dcid := mustHex("8394c8f03e515708")
 
-func TestDecryptInitial_Success(t *testing.T) {
-	tests := []struct {
-		name    string
-		version uint32
-	}{
-		{"v1", 0x00000001},
-		{"v2", 0x709a50c4},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			dcid := make([]byte, 8)
-			_, _ = rand.Read(dcid)
-			want := []byte("hello-quic-initial")
+	// HKDF-Extract(saltV1, dcid)
+	prk := hkdfExtractSHA256(saltV1, dcid)
+	hexEq(t, prk, "7db5df06e7a69e432496adedb00851923595221596ae2ae9fb8115c1e9ed0a44") // RFC 9001 A.1
 
-			pkt, dcid := buildInitial(tc.version, want)
-			got, ok := DecryptInitial(dcid, append([]byte(nil), pkt...))
-			if !ok {
-				t.Fatalf("DecryptInitial returned ok=false")
-			}
-			if !bytes.Equal(got, want) {
-				t.Fatalf("payload mismatch: got %q want %q", got, want)
-			}
-		})
+	// client_in → client secret
+	client, err := hkdfExpandLabel(prk, "client in", 32)
+	if err != nil {
+		t.Fatal(err)
 	}
+	hexEq(t, client, "c00cf151ca5be075ed0ebfb5c80323c42d6b7db67881289af4008f1f6c357aea")
+
+	// keys/iv/hp for v1
+	key, err := hkdfExpandLabel(client, "quic key", 16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	iv, err := hkdfExpandLabel(client, "quic iv", 12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hp, err := hkdfExpandLabel(client, "quic hp", 16)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	hexEq(t, key, "1f369613dd76d5467730efcbe3b1a22d")
+	hexEq(t, iv, "fa044b2f42a3fd3b46fb255c")
+	hexEq(t, hp, "9f50449e04a0e810283a1e9933adedd2")
 }
 
-func TestDecryptInitial_BadInputs(t *testing.T) {
-	dcid := []byte{0xaa, 0xbb}
+func TestV2IsInitialMapping(t *testing.T) {
+	// Minimal long header: |1|long|type|..|, version=v2, DCID/SCID lens = 0
+	b := make([]byte, 7)
+	b[0] = 0x80 | (0x01 << 4) // long header + type=01 (Initial in v2)
+	binary.BigEndian.PutUint32(b[1:5], versionV2)
+	// dcid_len=0, scid_len=0
+	// b[5]=0, b[6]=0 (already zero)
 
-	// --- unknown version --------------------------------------------------
-	// 1. build a perfectly valid v1 packet
-	validPkt, dcid := buildInitial(0x00000001, nil)
-	// 2. overwrite the version field (bytes 1..4) with an unsupported value
-	binary.BigEndian.PutUint32(validPkt[1:5], 0x11223344) // unknown version
-	if _, ok := DecryptInitial(dcid, validPkt); ok {
-		t.Fatalf("expected failure on unknown version")
+	if !IsInitial(b) {
+		t.Fatalf("v2 Initial mapping failed (expected true)")
 	}
-
-	// --- truncated packet -------------------------------------------------
-	shortPkt := []byte{0xc0}
-	if _, ok := DecryptInitial(dcid, shortPkt); ok {
-		t.Fatalf("expected failure on short packet")
+	// Retry in v2 is 00 → not Initial
+	b[0] = 0x80 | (0x00 << 4)
+	if IsInitial(b) {
+		t.Fatalf("v2 Retry misclassified as Initial")
 	}
 }

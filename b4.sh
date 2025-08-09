@@ -49,6 +49,12 @@ install() {
     local tmp_zip="/tmp/b4.tar.gz"
     rm -rf "$tmp_zip"
 
+    kernel_modules_load
+
+    if [ $IPV6 -eq 0 ]; then
+        ARGS="$ARGS --no-ipv6"
+    fi
+
     local asset_url="$B4_LATEST_RELEASE_URL$asset_name"
     echo "Downloading $asset_url..."
     curl -L "$asset_url" -o "$tmp_zip"
@@ -59,12 +65,21 @@ install() {
 
 start() {
     echo "Starting B4..."
-    "$B4_SHARE_DIR/b4" &
+    "$B4_SHARE_DIR/b4" $ARGS >/dev/null 2>&1 &
+
+    firewall_start_v4
+    firewall_start_v6
+    system_config
 }
 
 stop() {
     echo "Stopping B4..."
-    killall b4
+
+    firewall_stop_v4
+    firewall_stop_v6
+
+    killall $PROCS 2>/dev/null
+
 }
 
 restart() {

@@ -2,9 +2,9 @@ package mangle
 
 import (
 	"encoding/binary"
-	"log"
 
 	"github.com/daniellavrushin/b4/config"
+	"github.com/daniellavrushin/b4/logx"
 	"github.com/daniellavrushin/b4/tls"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
@@ -61,7 +61,7 @@ func sendAlteredSyn(tcp *layers.TCP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 	if err := gopacket.SerializeLayers(
 		buf, opts, ipLayer, &tcph, gopacket.Payload(payload),
 	); err != nil {
-		log.Printf("syn-fake serialize: %v", err)
+		logx.Errorf("failed to serialize TCP SYN packet: %v", err)
 		return VerdictAccept
 	}
 
@@ -253,7 +253,7 @@ func processTCP(tcp *layers.TCP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 		pkt2, err2 := build(second, baseSeq+uint32(len(first)))
 
 		if err1 != nil || err2 != nil {
-			log.Printf("fragment build: %v %v", err1, err2)
+			logx.Errorf("fragment build: %v %v", err1, err2)
 			return false
 		}
 

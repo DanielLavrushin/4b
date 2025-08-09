@@ -3,10 +3,10 @@ package queue
 
 import (
 	"context"
-	"log"
 
 	nfqueue "github.com/florianl/go-nfqueue"
 
+	"github.com/daniellavrushin/b4/logx"
 	"github.com/daniellavrushin/b4/processor"
 )
 
@@ -74,7 +74,7 @@ func NewWorker(conf Config, cb processor.Callback) (*Worker, error) {
 	}
 
 	errHook := func(err error) int {
-		log.Printf("nfqueue(%d): %v", conf.ID, err)
+		logx.Errorf("nfqueue(%d): %v", conf.ID, err)
 		return 0
 	}
 

@@ -45,6 +45,12 @@ const (
 	UDPFilterQuicParsed
 )
 
+const (
+	FakePayloadDefault = iota // use built-in FakeSNIPkt
+	FakePayloadCustom         // use FakeCustomPkt
+	FakePayloadRandom         // random blob (length-bounded)
+)
+
 type UDPDPortRange struct {
 	Start uint16
 	End   uint16
@@ -65,6 +71,7 @@ type Section struct {
 	FakingStrategy        int
 	FragMiddleSNI         bool
 	FragSNIPos            int
+	FragTwoStage          bool
 	FakingTTL             uint8
 	FakeSNI               bool
 	FakeSNISeqLen         uint
@@ -125,9 +132,10 @@ var DefaultSection = Section{
 	FakingTTL:             8,
 	FakeSNI:               true,
 	FakeSNISeqLen:         1,
-	FakeSNIType:           2,
+	FakeSNIType:           FakePayloadRandom,
 	FragMiddleSNI:         true,
 	FragSNIPos:            1,
+	FragTwoStage:          true,
 	FakeSeqOffset:         10000,
 	DPortFilter:           true,
 	SNIDetection:          0,

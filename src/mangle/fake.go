@@ -74,6 +74,15 @@ func buildFake(pktTemplate *layers.TCP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 		tcp.Window = ft.WinOverride
 	}
 
+	// FAKE_STRAT_TCP_MD5SUM: inject MD5 option (kind=19, len=18) + 2 NOPs
+	if ft.Strategy&fakeStratTCPMD5 != 0 {
+		tcp.Options = append(tcp.Options,
+			layers.TCPOption{OptionType: layers.TCPOptionKind(19), OptionLength: 18, OptionData: make([]byte, 16)},
+			layers.TCPOption{OptionType: layers.TCPOptionKindNop, OptionLength: 1},
+			layers.TCPOption{OptionType: layers.TCPOptionKindNop, OptionLength: 1},
+		)
+	}
+
 	var ipL gopacket.SerializableLayer
 	if ip4 != nil {
 		ip := *ip4
@@ -97,34 +106,57 @@ func buildFake(pktTemplate *layers.TCP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 	return buf.Bytes(), nil
 }
 
-func sendFakeSequence(ft fakeType,
+func sendFakeSequence(sec *config.Section, ft fakeType,
 	tcp *layers.TCP, ip4 *layers.IPv4, ip6 *layers.IPv6) {
 
-	if ft.SequenceLen == 0 || len(ft.Payload) == 0 {
+	if ft.SequenceLen == 0 {
 		return
 	}
+
+	var payload []byte
+	switch sec.FakeSNIType {
+	case config.FakePayloadCustom:
+		payload = sec.FakeCustomPkt
+		if len(payload) == 0 {
+			payload = ft.Payload
+		}
+	case config.FakePayloadRandom:
+		n := 0
+		if len(ft.Payload) > 0 {
+			n = len(ft.Payload)
+		}
+		if len(sec.FakeCustomPkt) > 0 && len(sec.FakeCustomPkt) < n {
+			n = len(sec.FakeCustomPkt)
+		}
+		if n <= 0 || n > 1200 {
+			n = 1200
+		}
+		payload = make([]byte, 1+rand.Intn(n)) // 1..n bytes of garbage
+	default:
+		payload = ft.Payload
+	}
+
 	baseSeq := tcp.Seq
 
 	send := func(raw []byte) { // honours Seg2Delay exactly like C
 		if ft.Seg2Delay == 0 {
-			_ = SendRaw(raw)
+			_ = sendRaw(raw)
 		} else {
-			_ = SendDelayed(raw, ft.Seg2Delay)
+			_ = sendDelayed(raw, ft.Seg2Delay)
 		}
 	}
 
 	/* ----  iterate strategy → sequence_len loop ---------- */
 	ft.iterateStrategies(func(flag int) {
 		for i := uint(0); i < ft.SequenceLen; i++ {
-			raw, err := buildFake(tcp, ip4, ip6, ft.Payload,
+			raw, err := buildFake(tcp, ip4, ip6, payload,
 				flag, baseSeq, ft)
 			if err == nil {
 				send(raw)
 			}
 
-			// C code bumps SEQ only for non-Rand/Past
 			if flag != fakeStratPastSeq && flag != fakeStratRandSeq {
-				baseSeq += uint32(len(ft.Payload))
+				baseSeq += uint32(len(payload))
 			}
 		}
 	})

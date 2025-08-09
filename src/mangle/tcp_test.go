@@ -276,7 +276,7 @@ func TestSendFrags_OverridesTCPWindow(t *testing.T) {
 
 	// stub fake sequence to avoid touching nil headers
 	origFake := sendFakeSeq
-	sendFakeSeq = func(_ fakeType, _ *layers.TCP, _ *layers.IPv4, _ *layers.IPv6) {}
+	sendFakeSeq = func(_ *config.Section, _ fakeType, _ *layers.TCP, _ *layers.IPv4, _ *layers.IPv6) {}
 	t.Cleanup(func() { sendFakeSeq = origFake })
 
 	sec := &config.Section{
@@ -345,7 +345,7 @@ func TestProcessTCP_NonFrag_Seg2Delay_XorRule(t *testing.T) {
 	origRaw, origDel, origFake := sendRaw, sendDelayed, sendFakeSeq
 	sendRaw = func(_ []byte) error { calls = append(calls, "raw"); return nil }
 	sendDelayed = func(_ []byte, _ uint) error { calls = append(calls, "delay"); return nil }
-	sendFakeSeq = func(_ fakeType, _ *layers.TCP, _ *layers.IPv4, _ *layers.IPv6) {
+	sendFakeSeq = func(_ *config.Section, _ fakeType, _ *layers.TCP, _ *layers.IPv4, _ *layers.IPv6) {
 		calls = append(calls, "fake")
 	}
 	t.Cleanup(func() {
@@ -471,7 +471,7 @@ func TestProcessTCP_IPv6_NonFrag_Seg2Delay_XorRule(t *testing.T) {
 	origRaw, origDel, origFake := sendRaw, sendDelayed, sendFakeSeq
 	sendRaw = func(_ []byte) error { calls = append(calls, "raw"); return nil }
 	sendDelayed = func(_ []byte, _ uint) error { calls = append(calls, "delay"); return nil }
-	sendFakeSeq = func(_ fakeType, _ *layers.TCP, _ *layers.IPv4, _ *layers.IPv6) {
+	sendFakeSeq = func(_ *config.Section, _ fakeType, _ *layers.TCP, _ *layers.IPv4, _ *layers.IPv6) {
 		calls = append(calls, "fake")
 	}
 	t.Cleanup(func() { sendRaw, sendDelayed, sendFakeSeq = origRaw, origDel, origFake })
@@ -568,7 +568,7 @@ func TestProcessTCP_FragPaths_CallersAndSendOrder(t *testing.T) {
 		calls = append(calls, "delay:"+label(b))
 		return nil
 	}
-	sendFakeSeq = func(_ fakeType, _ *layers.TCP, _ *layers.IPv4, _ *layers.IPv6) {
+	sendFakeSeq = func(_ *config.Section, _ fakeType, _ *layers.TCP, _ *layers.IPv4, _ *layers.IPv6) {
 		calls = append(calls, "fake")
 	}
 	t.Cleanup(func() { sendRaw, sendDelayed, sendFakeSeq = origRaw, origDel, origFake })

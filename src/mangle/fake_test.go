@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"math/rand"
+	"net"
 	"testing"
 	"time"
 
@@ -42,8 +43,8 @@ func decode(raw []byte) (ip4 *layers.IPv4, ip6 *layers.IPv6, tcp *layers.TCP) {
 // template constructs a minimal IP+TCP template used in all tests.
 func templateIPv4() (*layers.IPv4, *layers.TCP) {
 	ip := &layers.IPv4{
-		SrcIP:    []byte{1, 1, 1, 1},
-		DstIP:    []byte{2, 2, 2, 2},
+		SrcIP:    net.IP{1, 1, 1, 1},
+		DstIP:    net.IP{2, 2, 2, 2},
 		Version:  4,
 		TTL:      64,
 		Protocol: layers.IPProtocolTCP,
@@ -60,8 +61,8 @@ func templateIPv4() (*layers.IPv4, *layers.TCP) {
 
 func templateIPv6() (*layers.IPv6, *layers.TCP) {
 	ip6 := &layers.IPv6{
-		SrcIP:      bytes.Repeat([]byte{0x11}, 16),
-		DstIP:      bytes.Repeat([]byte{0x22}, 16),
+		SrcIP:      net.IP(bytes.Repeat([]byte{0x11}, 16)),
+		DstIP:      net.IP(bytes.Repeat([]byte{0x22}, 16)),
 		Version:    6,
 		HopLimit:   64,
 		NextHeader: layers.IPProtocolTCP,
@@ -92,6 +93,13 @@ func TestIterateStrategies(t *testing.T) {
 			t.Fatalf("iterateStrategies order mismatch: want %v got %v", want, got)
 		}
 	}
+}
+
+/* ---------- init ---------- */
+
+func init() {
+	// ensure deterministic RandSeq test
+	rand.Seed(time.Now().UnixNano())
 }
 
 /* ---------- tests for buildFake ---------- */
@@ -170,6 +178,7 @@ func TestFakeTypeFromSection(t *testing.T) {
 /* ---------- smoke test for sendFakeSequence ---------- */
 
 func TestSendFakeSequence_NoPanic(t *testing.T) {
+	sec := &config.Section{}
 	ip, tcpTmpl := templateIPv4()
 	ft := fakeType{
 		SequenceLen: 0, // no packets really sent
@@ -181,12 +190,135 @@ func TestSendFakeSequence_NoPanic(t *testing.T) {
 			t.Fatalf("sendFakeSequence panicked: %v", r)
 		}
 	}()
-	sendFakeSequence(ft, tcpTmpl, ip, nil)
+	sendFakeSequence(sec, ft, tcpTmpl, ip, nil)
 }
 
-/* ---------- init ---------- */
+/* ---------- new tests: MD5 option + payload source + delay routing ----- */
 
-func init() {
-	// ensure deterministic RandSeq test
-	rand.Seed(time.Now().UnixNano())
+func TestBuildFake_MD5OptionAndWindowOverride_IPv4(t *testing.T) {
+	ip, tcpTmpl := templateIPv4()
+	ft := fakeType{
+		Payload:     []byte("HELLO"),
+		WinOverride: 4096,
+		Strategy:    fakeStratTCPMD5,
+	}
+	raw, err := buildFake(tcpTmpl, ip, nil, ft.Payload /*flag*/, 0, tcpTmpl.Seq, ft)
+	if err != nil {
+		t.Fatalf("buildFake: %v", err)
+	}
+	ip4, _, tcp := decode(raw)
+	if ip4 == nil || tcp == nil {
+		t.Fatalf("decode failed")
+	}
+	// window must be overridden
+	if tcp.Window != 4096 {
+		t.Fatalf("window=%d want 4096", tcp.Window)
+	}
+	// options must contain MD5 (kind=19,len=18) and at least two NOPs; data offset > 5
+	foundMD5, nop := false, 0
+	for _, o := range tcp.Options {
+		if o.OptionType == layers.TCPOptionKind(19) && o.OptionLength == 18 && len(o.OptionData) == 16 {
+			foundMD5 = true
+		}
+		if o.OptionType == layers.TCPOptionKindNop {
+			nop++
+		}
+	}
+	if !foundMD5 || nop < 2 {
+		t.Fatalf("MD5/NOP options not present as expected (foundMD5=%v, nop=%d)", foundMD5, nop)
+	}
+	if tcp.DataOffset <= 5 {
+		t.Fatalf("DataOffset=%d want >5 (options added)", tcp.DataOffset)
+	}
+}
+
+func TestSendFakeSequence_CustomPayloadChosen(t *testing.T) {
+	// capture one packet
+	var sent [][]byte
+	orig := sendRaw
+	sendRaw = func(b []byte) error { sent = append(sent, b); return nil }
+	t.Cleanup(func() { sendRaw = orig })
+
+	sec := &config.Section{
+		FakeSNIType:   config.FakePayloadCustom,
+		FakeCustomPkt: []byte("WORLD"),
+	}
+	ip, tcpTmpl := templateIPv4()
+	ft := fakeType{
+		SequenceLen: 1,
+		Payload:     []byte("IGNORED"), // should be ignored
+	}
+	sendFakeSequence(sec, ft, tcpTmpl, ip, nil)
+	if len(sent) != 1 {
+		t.Fatalf("sent=%d want=1", len(sent))
+	}
+	_, _, tcp := decode(sent[0])
+	if tcp == nil || len(tcp.Payload) != len(sec.FakeCustomPkt) {
+		t.Fatalf("payload len=%d want=%d", len(tcp.Payload), len(sec.FakeCustomPkt))
+	}
+	if !bytes.Equal(tcp.Payload, sec.FakeCustomPkt) {
+		t.Fatalf("payload=%q want=%q", tcp.Payload, sec.FakeCustomPkt)
+	}
+}
+
+func TestSendFakeSequence_RandomPayloadLenRange(t *testing.T) {
+	// record payload lengths
+	var lens []int
+	orig := sendRaw
+	sendRaw = func(b []byte) error {
+		_, _, tcp := decode(b)
+		lens = append(lens, len(tcp.Payload))
+		return nil
+	}
+	t.Cleanup(func() { sendRaw = orig })
+
+	// deterministic RNG but we assert range anyway
+	rand.Seed(1)
+
+	sec := &config.Section{
+		FakeSNIType: config.FakePayloadRandom,
+	}
+	ip, tcpTmpl := templateIPv4()
+	ft := fakeType{
+		SequenceLen: 3,
+		Payload:     bytes.Repeat([]byte{'A'}, 100), // upper bound
+	}
+	sendFakeSequence(sec, ft, tcpTmpl, ip, nil)
+	if len(lens) != 3 {
+		t.Fatalf("sent=%d want=3", len(lens))
+	}
+	for i, n := range lens {
+		if n < 1 || n > 100 {
+			t.Fatalf("len[%d]=%d out of [1,100]", i, n)
+		}
+	}
+}
+
+func TestSendFakeSequence_RespectsSeg2Delay(t *testing.T) {
+	var calls []string
+	origRaw, origDel := sendRaw, sendDelayed
+	sendRaw = func(_ []byte) error { calls = append(calls, "raw"); return nil }
+	sendDelayed = func(_ []byte, _ uint) error { calls = append(calls, "delay"); return nil }
+	t.Cleanup(func() { sendRaw, sendDelayed = origRaw, origDel })
+
+	sec := &config.Section{}
+	ip, tcpTmpl := templateIPv4()
+	ft := fakeType{
+		SequenceLen: 1,
+		Payload:     []byte("X"),
+	}
+	// case: no delay
+	calls = nil
+	ft.Seg2Delay = 0
+	sendFakeSequence(sec, ft, tcpTmpl, ip, nil)
+	if len(calls) != 1 || calls[0] != "raw" {
+		t.Fatalf("want raw, got %v", calls)
+	}
+	// case: delay set
+	calls = nil
+	ft.Seg2Delay = 50
+	sendFakeSequence(sec, ft, tcpTmpl, ip, nil)
+	if len(calls) != 1 || calls[0] != "delay" {
+		t.Fatalf("want delay, got %v", calls)
+	}
 }

@@ -100,6 +100,7 @@ func processTCP(tcp *layers.TCP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 	if !ok {
 		return VerdictContinue
 	}
+
 	origPacket := origPkt
 
 	// 1. Calculate offsets -------------------------------------------------
@@ -236,10 +237,10 @@ func processTCP(tcp *layers.TCP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 		ft := fakeTypeFromSection(sec)
 		// for the default (non-frag) path, dvs equals the size of the first real payload part
 		dvsLocal := len(first)
-		if sec.FragSNIFaked {
+		if sec.FragSNIFaked || sec.FragTwoStage {
 			ft.RandSeqOff = dvsLocal
 		}
-		sendFakeSeq(ft, tcp, ip4, ip6)
+		sendFakeSeq(sec, ft, tcp, ip4, ip6)
 	}
 
 	dvsLocal := len(first)
@@ -269,10 +270,10 @@ func sendFrags(sec *config.Section, a, b []byte, dvs int, tcp *layers.TCP, ip4 *
 	{
 		// fake burst in the middle for frag paths as well
 		ft := fakeTypeFromSection(sec)
-		if sec.FragSNIFaked {
+		if sec.FragSNIFaked || sec.FragTwoStage {
 			ft.RandSeqOff = dvs
 		}
-		sendFakeSeq(ft, tcp, ip4, ip6)
+		sendFakeSeq(sec, ft, tcp, ip4, ip6)
 	}
 	if sec.Seg2Delay > 0 && ((dvs > 0) != sec.FragSNIReverse) {
 		_ = sendDelayed(second, sec.Seg2Delay)

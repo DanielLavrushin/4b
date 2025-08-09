@@ -1,0 +1,70 @@
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: release version
+        required: true
+        default: 1.0.0
+      draft:
+        description: save the release as a draft first?
+        required: false
+        default: false
+        type: boolean
+      prerelease:
+        description: mark this build as a pre-release?
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+env:
+  VERSION: ${{ inputs.version }}
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: build b4
+        run: |
+          make all
+
+      - name: list built files
+        run: ls -al out out/assets
+
+      - name: export asset list
+        id: assets
+        run: |
+          echo "ASSET_FILES<<EOF" >> $GITHUB_ENV
+          ls out/assets/*.tar.gz >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+
+          echo "files<<EOF" >> $GITHUB_OUTPUT
+          ls out/assets/*.tar.gz >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: upload files to artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: b4-${{ env.VERSION }}
+          path: ${{ steps.assets.outputs.files }}
+
+      - name: create or update release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ env.VERSION }}
+          name: v${{ env.VERSION }}
+          draft: ${{ inputs.draft }}
+          prerelease: ${{ inputs.prerelease }}
+          files: ${{ steps.assets.outputs.files }}

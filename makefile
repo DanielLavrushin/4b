@@ -1,3 +1,4 @@
+VERSION ?= 1.0.0
 BINARY_NAME := b4
 SRC_DIR := ./src
 OUT_DIR := ./out
@@ -17,8 +18,8 @@ ANDROID_ARCHS := amd64 arm64 armv7
 all: build
 
 build:
-	@echo "Building $(BINARY_NAME)..."
-	@rm -rf $(OUT_DIR); mkdir -p $(OUT_DIR)
+	@echo "Building $(BINARY_NAME) $(VERSION)..."
+	@rm -rf $(OUT_DIR); mkdir -p $(OUT_DIR)/assets
 ifneq ($(ENABLE_LINUX),0)
 	@$(MAKE) os_linux
 endif
@@ -69,21 +70,27 @@ os_android:
 	done
 
 build_single:
-	@OUT_PATH="$(OUT_DIR)/$(GOOS)-$(TARGET)"; \
-	mkdir -p $$OUT_PATH; \
+	@set -e; \
+	OUT_PATH="$(OUT_DIR)/$(GOOS)-$(TARGET)"; \
 	echo "Building for $(GOOS) ($(TARGET))..."; \
-	GOOS=$(GOOS) GOARCH=$(GOARCH) GOARM=$(GOARM) CGO_ENABLED=$(CGO_ENABLED) go build -C $(SRC_DIR) -o ../$$OUT_PATH/$(BINARY_NAME)
+	mkdir -p "$$OUT_PATH" "$(OUT_DIR)/assets"; \
+	GOOS=$(GOOS) GOARCH=$(GOARCH) GOARM=$(GOARM) CGO_ENABLED=$(CGO_ENABLED) go -C $(SRC_DIR) build -ldflags "-X main.Version=$(VERSION)" -o ../"$$OUT_PATH"/$(BINARY_NAME); \
+	tar -C "$$OUT_PATH" -czf "$(OUT_DIR)/assets/$(BINARY_NAME)-$(VERSION)-$(GOOS)-$(TARGET).tar.gz" "$(BINARY_NAME)"; \
+	sha256sum "$(OUT_DIR)/assets/$(BINARY_NAME)-$(VERSION)-$(GOOS)-$(TARGET).tar.gz" > "$(OUT_DIR)/assets/$(BINARY_NAME)-$(VERSION)-$(GOOS)-$(TARGET).tar.gz.sha256"
 
 build_single_android:
-	@case "$(GOARCH)" in \
+	@set -e; \
+	case "$(GOARCH)" in \
 		amd64) CC="$$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-*/bin/x86_64-linux-android21-clang" ;; \
 		arm64) CC="$$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-*/bin/aarch64-linux-android21-clang" ;; \
 		arm)   CC="$$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-*/bin/armv7a-linux-androideabi19-clang" ;; \
 	esac; \
 	OUT_PATH="$(OUT_DIR)/$(GOOS)-$(TARGET)"; \
-	mkdir -p $$OUT_PATH; \
 	echo "Building for $(GOOS) ($(TARGET))..."; \
-	GOOS=$(GOOS) GOARCH=$(GOARCH) GOARM=$(GOARM) CGO_ENABLED=1 CC=$$CC go build -C $(SRC_DIR) -o ../$$OUT_PATH/$(BINARY_NAME)
+	mkdir -p "$$OUT_PATH" "$(OUT_DIR)/assets"; \
+	GOOS=$(GOOS) GOARCH=$(GOARCH) GOARM=$(GOARM) CGO_ENABLED=1 CC=$$CC go -C $(SRC_DIR) build -ldflags "-X main.Version=$(VERSION)" -o ../"$$OUT_PATH"/$(BINARY_NAME); \
+	tar -C "$$OUT_PATH" -czf "$(OUT_DIR)/assets/$(BINARY_NAME)-$(VERSION)-$(GOOS)-$(TARGET).tar.gz" "$(BINARY_NAME)"; \
+	sha256sum "$(OUT_DIR)/assets/$(BINARY_NAME)-$(VERSION)-$(GOOS)-$(TARGET).tar.gz" > "$(OUT_DIR)/assets/$(BINARY_NAME)-$(VERSION)-$(GOOS)-$(TARGET).tar.gz.sha256"
 
 clean:
 	rm -rf $(OUT_DIR)

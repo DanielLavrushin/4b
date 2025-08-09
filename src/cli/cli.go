@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bufio"
 	"encoding/hex"
 	"fmt"
 	"os"
@@ -40,35 +41,37 @@ func Parse(cfg *config.Config, args []string) ([]*config.Section, error) {
 
 	// section‑scoped flags (applied to *sec* at parse time)
 	var (
-		tls               = fs.String("tls", "enabled", "")
-		fakeSNI           = fs.Bool("fake-sni", sec.FakeSNI, "")
-		fakeSNISeqLen     = fs.Uint("fake-sni-seq-len", sec.FakeSNISeqLen, "")
-		fakeSNIType       = fs.String("fake-sni-type", "default", "")
-		fakeCustomPayload = fs.String("fake-custom-payload", "", "")
-		fakeCustomFile    = fs.String("fake-custom-payload-file", "", "")
-		fakingStrategy    = fs.String("faking-strategy", "randseq", "")
-		fakingTTL         = fs.Uint8("faking-ttl", sec.FakingTTL, "")
-		fakeSeqOffset     = fs.Int("fake-seq-offset", sec.FakeSeqOffset, "")
-		frag              = fs.String("frag", "tcp", "")
-		fragSNIR          = fs.Bool("frag-sni-reverse", sec.FragSNIReverse, "")
-		fragSNIFaked      = fs.Bool("frag-sni-faked", sec.FragSNIFaked, "")
-		fragMiddleSNI     = fs.Bool("frag-middle-sni", sec.FragMiddleSNI, "")
-		fragSNIPos        = fs.Int("frag-sni-pos", sec.FragSNIPos, "")
-		fkWinSize         = fs.Uint("fk-winsize", sec.FKWinSize, "")
-		synfake           = fs.Bool("synfake", sec.SynFake, "")
-		synfakeLen        = fs.Uint("synfake-len", sec.SynFakeLen, "")
-		sniDetection      = fs.String("sni-detection", "parse", "")
-		seg2delay         = fs.Uint("seg2delay", sec.Seg2Delay, "")
-		sniDomains        = fs.String("sni-domains", "", "")
-		excludeDomains    = fs.String("exclude-domains", "", "")
-		udpMode           = fs.String("udp-mode", "fake", "")
-		udpFakeSeqLen     = fs.Uint("udp-fake-seq-len", sec.UDPFakeSeqLen, "")
-		udpFakeLen        = fs.Uint("udp-fake-len", sec.UDPFakeLen, "")
-		udpDportFilter    = fs.String("udp-dport-filter", "", "")
-		udpFakingStrategy = fs.String("udp-faking-strategy", "none", "")
-		udpFilterQUIC     = fs.String("udp-filter-quic", "disabled", "")
-		quicDrop          = fs.Bool("quic-drop", false, "")
-		noDPortFilter     = fs.Bool("no-dport-filter", !sec.DPortFilter, "")
+		tls                = fs.String("tls", "enabled", "")
+		fakeSNI            = fs.Bool("fake-sni", sec.FakeSNI, "")
+		fakeSNISeqLen      = fs.Uint("fake-sni-seq-len", sec.FakeSNISeqLen, "")
+		fakeSNIType        = fs.String("fake-sni-type", "default", "")
+		fakeCustomPayload  = fs.String("fake-custom-payload", "", "")
+		fakeCustomFile     = fs.String("fake-custom-payload-file", "", "")
+		fakingStrategy     = fs.String("faking-strategy", "randseq", "")
+		fakingTTL          = fs.Uint8("faking-ttl", sec.FakingTTL, "")
+		fakeSeqOffset      = fs.Int("fake-seq-offset", sec.FakeSeqOffset, "")
+		frag               = fs.String("frag", "tcp", "")
+		fragSNIR           = fs.Bool("frag-sni-reverse", sec.FragSNIReverse, "")
+		fragSNIFaked       = fs.Bool("frag-sni-faked", sec.FragSNIFaked, "")
+		fragMiddleSNI      = fs.Bool("frag-middle-sni", sec.FragMiddleSNI, "")
+		fragSNIPos         = fs.Int("frag-sni-pos", sec.FragSNIPos, "")
+		fkWinSize          = fs.Uint("fk-winsize", sec.FKWinSize, "")
+		synfake            = fs.Bool("synfake", sec.SynFake, "")
+		synfakeLen         = fs.Uint("synfake-len", sec.SynFakeLen, "")
+		sniDetection       = fs.String("sni-detection", "parse", "")
+		seg2delay          = fs.Uint("seg2delay", sec.Seg2Delay, "")
+		sniDomains         = fs.String("sni-domains", "", "")
+		excludeDomains     = fs.String("exclude-domains", "", "")
+		udpMode            = fs.String("udp-mode", "fake", "")
+		udpFakeSeqLen      = fs.Uint("udp-fake-seq-len", sec.UDPFakeSeqLen, "")
+		udpFakeLen         = fs.Uint("udp-fake-len", sec.UDPFakeLen, "")
+		udpDportFilter     = fs.String("udp-dport-filter", "", "")
+		udpFakingStrategy  = fs.String("udp-faking-strategy", "none", "")
+		udpFilterQUIC      = fs.String("udp-filter-quic", "disabled", "")
+		quicDrop           = fs.Bool("quic-drop", false, "")
+		noDPortFilter      = fs.Bool("no-dport-filter", !sec.DPortFilter, "")
+		sniDomainsFile     = fs.String("sni-domains-file", "", "Path to file with SNI domains to include (one per line).")
+		excludeDomainsFile = fs.String("exclude-domains-file", "", "Path to file with SNI domains to exclude (one per line).")
 	)
 
 	// dummy section delimiters recognised manually
@@ -171,11 +174,21 @@ func Parse(cfg *config.Config, args []string) ([]*config.Section, error) {
 		if *sniDomains == "all" {
 			sec.AllDomains = 1
 		} else {
-			sec.SNIDomains = strings.Split(*sniDomains, ",")
+			for _, s := range strings.Split(*sniDomains, ",") {
+				s = strings.TrimSpace(s)
+				if s != "" {
+					sec.SNIDomains = append(sec.SNIDomains, s)
+				}
+			}
 		}
 	}
 	if *excludeDomains != "" {
-		sec.ExcludeSNIDomains = strings.Split(*excludeDomains, ",")
+		for _, s := range strings.Split(*excludeDomains, ",") {
+			s = strings.TrimSpace(s)
+			if s != "" {
+				sec.ExcludeSNIDomains = append(sec.ExcludeSNIDomains, s)
+			}
+		}
 	}
 	// UDP / QUIC
 	switch *udpMode {
@@ -221,11 +234,87 @@ func Parse(cfg *config.Config, args []string) ([]*config.Section, error) {
 		sec.UDPMode = config.UDPMODEDrop
 		sec.UDPFilterQuic = config.UDPFilterQuicAll
 	}
+
+	// Load include/exclude domain files and merge
+	if err := applyDomainFiles(sec, *sniDomainsFile, *excludeDomainsFile); err != nil {
+		return nil, fmt.Errorf("domain file error: %w", err)
+	}
+
 	if *noDPortFilter {
 		sec.DPortFilter = false
 	}
 
 	return cfg.Sections(), nil
+}
+
+// --- helpers --------------------------------------------------------------
+
+// applyDomainFiles reads include/exclude domain files, normalizes, and merges.
+// Blank lines and lines starting with '#' or ';' are ignored.
+func applyDomainFiles(sec *config.Section, includePath, excludePath string) error {
+	if includePath != "" {
+		inc, err := readDomainFile(includePath)
+		if err != nil {
+			return fmt.Errorf("read %q: %w", includePath, err)
+		}
+		sec.SNIDomains = append(sec.SNIDomains, inc...)
+	}
+	if excludePath != "" {
+		exc, err := readDomainFile(excludePath)
+		if err != nil {
+			return fmt.Errorf("read %q: %w", excludePath, err)
+		}
+		sec.ExcludeSNIDomains = append(sec.ExcludeSNIDomains, exc...)
+	}
+	// Normalize + dedupe
+	sec.SNIDomains = dedupeLower(sec.SNIDomains)
+	sec.ExcludeSNIDomains = dedupeLower(sec.ExcludeSNIDomains)
+	return nil
+}
+
+func readDomainFile(path string) ([]string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	var out []string
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+
+		// Strip inline comments and then re-trim
+		if i := strings.IndexAny(line, "#;"); i >= 0 {
+			line = line[:i]
+		}
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		out = append(out, strings.ToLower(line))
+	}
+	if err := sc.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func dedupeLower(in []string) []string {
+	seen := make(map[string]struct{}, len(in))
+	out := in[:0]
+	for _, s := range in {
+		s = strings.ToLower(strings.TrimSpace(s))
+		if s == "" {
+			continue
+		}
+		if _, ok := seen[s]; ok {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	return out
 }
 
 func parseU16(s string) uint16 {

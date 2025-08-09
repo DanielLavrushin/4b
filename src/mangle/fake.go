@@ -113,6 +113,22 @@ func sendFakeSequence(sec *config.Section, ft fakeType,
 		return
 	}
 
+	// Precompute cap for random payload size (same bounds logic as before)
+	randomPerPacket := sec.FakeSNIType == config.FakePayloadRandom
+	randCap := 0
+	if randomPerPacket {
+		if len(ft.Payload) > 0 {
+			randCap = len(ft.Payload)
+		}
+		if len(sec.FakeCustomPkt) > 0 && len(sec.FakeCustomPkt) < randCap {
+			randCap = len(sec.FakeCustomPkt)
+		}
+		if randCap <= 0 || randCap > 1200 {
+			randCap = 1200
+		}
+	}
+
+	// Non-random payload is chosen once
 	var payload []byte
 	switch sec.FakeSNIType {
 	case config.FakePayloadCustom:
@@ -121,24 +137,14 @@ func sendFakeSequence(sec *config.Section, ft fakeType,
 			payload = ft.Payload
 		}
 	case config.FakePayloadRandom:
-		n := 0
-		if len(ft.Payload) > 0 {
-			n = len(ft.Payload)
-		}
-		if len(sec.FakeCustomPkt) > 0 && len(sec.FakeCustomPkt) < n {
-			n = len(sec.FakeCustomPkt)
-		}
-		if n <= 0 || n > 1200 {
-			n = 1200
-		}
-		payload = make([]byte, 1+rand.Intn(n)) // 1..n bytes of garbage
+		// defer to per-packet generation below
 	default:
 		payload = ft.Payload
 	}
 
 	baseSeq := tcp.Seq
 
-	send := func(raw []byte) { // honours Seg2Delay exactly like C
+	send := func(raw []byte) {
 		if ft.Seg2Delay == 0 {
 			_ = sendRaw(raw)
 		} else {
@@ -146,17 +152,24 @@ func sendFakeSequence(sec *config.Section, ft fakeType,
 		}
 	}
 
-	/* ----  iterate strategy → sequence_len loop ---------- */
 	ft.iterateStrategies(func(flag int) {
 		for i := uint(0); i < ft.SequenceLen; i++ {
-			raw, err := buildFake(tcp, ip4, ip6, payload,
-				flag, baseSeq, ft)
+			// choose payload for this packet
+			p := payload
+			if randomPerPacket {
+				p = make([]byte, 1+rand.Intn(randCap))
+			}
+			if p == nil {
+				p = ft.Payload
+			}
+
+			raw, err := buildFake(tcp, ip4, ip6, p, flag, baseSeq, ft)
 			if err == nil {
 				send(raw)
 			}
 
 			if flag != fakeStratPastSeq && flag != fakeStratRandSeq {
-				baseSeq += uint32(len(payload))
+				baseSeq += uint32(len(p)) // advance by actual per-packet length
 			}
 		}
 	})
@@ -172,6 +185,33 @@ func fakeTypeFromSection(sec *config.Section) fakeType {
 		Seg2Delay:   sec.Seg2Delay,
 		WinOverride: uint16(sec.FKWinSize),
 	}
+}
+
+func chooseFakePayload(sec *config.Section, fallback []byte, maxLen int) []byte {
+	var p []byte
+	switch sec.FakeSNIType {
+	case config.FakePayloadCustom:
+		if len(sec.FakeCustomPkt) > 0 {
+			p = sec.FakeCustomPkt
+		}
+	case config.FakePayloadRandom:
+		// upper bound: prefer configured length(s), cap at ~1200
+		n := len(fallback)
+		if n <= 0 || n > 1200 {
+			n = 1200
+		}
+		if maxLen > 0 && maxLen < n {
+			n = maxLen
+		}
+		p = make([]byte, 1+rand.Intn(n))
+	}
+	if p == nil {
+		p = fallback
+		if maxLen > 0 && maxLen < len(p) {
+			p = p[:maxLen]
+		}
+	}
+	return p
 }
 
 func init() { rand.Seed(time.Now().UnixNano()) }

@@ -1,6 +1,7 @@
 package mangle
 
 import (
+	"encoding/binary"
 	"math/rand"
 	"time"
 
@@ -14,8 +15,13 @@ func init() { rand.Seed(time.Now().UnixNano()) }
 func processUDP(udp *layers.UDP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 	payload gopacket.Payload, sec *config.Section, origPacket []byte) Verdict {
 
+	/* 0.  sanity checks ----------------------------------------------- */
+	if v := processUDPQUIC(sec, udp, []byte(payload)); v != VerdictContinue {
+		return v
+	}
+
 	/* 1.  quick filter -------------------------------------------------- */
-	if !udpFiltered(sec, udp, payload) {
+	if !udpFiltered(sec, udp, []byte(payload)) {
 		return VerdictContinue
 	}
 
@@ -30,7 +36,7 @@ func processUDP(udp *layers.UDP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 		sendFakeUDPSequence(sec, udp, ip4, ip6)
 
 		// then forward the *real* packet exactly once
-		_ = SendRaw(origPacket)
+		_ = sendRaw(origPacket)
 		return VerdictDrop // original must not reach kernel
 
 	default:
@@ -77,10 +83,6 @@ func buildFakeUDP(tpl *layers.UDP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 
 	udp := *tpl // shallow copy
 
-	if sec.UDPFakingStrategy&config.FakeStratUDPCheck != 0 {
-		udp.Checksum++
-	}
-
 	var ipL gopacket.SerializableLayer
 	if ip4 != nil {
 		ip := *ip4
@@ -103,7 +105,20 @@ func buildFakeUDP(tpl *layers.UDP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 	if err := gopacket.SerializeLayers(buf, opts, ipL, &udp, gopacket.Payload(fakePayload)); err != nil {
 		return nil, err
 	}
-	return buf.Bytes(), nil
+	raw := buf.Bytes()
+	// Nudge checksum AFTER compute (like C: udph->check += 1)
+	off := 0
+	if ip4 != nil {
+		off = int(ip4.IHL) * 4
+	} else {
+		off = 40
+	}
+	if len(raw) >= off+8 && (sec.UDPFakingStrategy&config.FakeStratUDPCheck) != 0 {
+		c := binary.BigEndian.Uint16(raw[off+6 : off+8])
+		c++
+		binary.BigEndian.PutUint16(raw[off+6:off+8], c)
+	}
+	return raw, nil
 }
 
 // full fake sequence (the nested for-loop from C code)
@@ -118,6 +133,6 @@ func sendFakeUDPSequence(sec *config.Section, udp *layers.UDP,
 		if err != nil {
 			continue
 		}
-		_ = SendRaw(raw)
+		_ = sendRaw(raw)
 	}
 }

@@ -77,6 +77,60 @@ func templateIPv6() (*layers.IPv6, *layers.TCP) {
 	return ip6, tcp
 }
 
+// --- Inline fake is plain (no strategy effects) -----------------------------
+
+func makeClientHelloWithSNI(host string) []byte {
+	h := []byte(host)
+	hostLen := len(h)
+
+	// SNI extension
+	// ext type 0x0000, ext data:
+	//   server_name_list_len(2) = 1 + 2 + hostLen
+	//   name_type(1)=0
+	//   host_name_len(2)=hostLen
+	//   host_name(hostLen)
+	snListLen := 1 + 2 + hostLen
+	extDataLen := 2 + snListLen
+
+	ext := make([]byte, 0, 4+extDataLen)
+	ext = append(ext, 0x00, 0x00)                            // type
+	ext = append(ext, byte(extDataLen>>8), byte(extDataLen)) // length
+	ext = append(ext, byte(snListLen>>8), byte(snListLen))   // server_name_list len
+	ext = append(ext, 0x00)                                  // name_type = host_name(0)
+	ext = append(ext, byte(hostLen>>8), byte(hostLen))       // host len
+	ext = append(ext, h...)                                  // host
+
+	// Extensions block (only SNI)
+	extsLen := len(ext)
+	exts := make([]byte, 0, 2+extsLen)
+	exts = append(exts, byte(extsLen>>8), byte(extsLen))
+	exts = append(exts, ext...)
+
+	// Minimal ClientHello body (TLS 1.2 style)
+	body := make([]byte, 0, 2+32+1+2+2+1+1+len(exts))
+	body = append(body, 0x03, 0x03)             // client_version
+	body = append(body, make([]byte, 32)...)    // random
+	body = append(body, 0x00)                   // session_id_len = 0
+	body = append(body, 0x00, 0x02, 0x00, 0x2f) // cipher_suites_len=2, one suite 0x002f
+	body = append(body, 0x01, 0x00)             // compression_methods_len=1, null(0)
+	body = append(body, exts...)                // extensions
+
+	// Handshake header (type=ClientHello(1), len=bodyLen)
+	hs := make([]byte, 0, 4+len(body))
+	hs = append(hs, 0x01) // ClientHello
+	bodyLen := len(body)
+	hs = append(hs, 0x00, byte(bodyLen>>8), byte(bodyLen)) // 3-byte length
+	hs = append(hs, body...)
+
+	// TLS record: type=handshake(22), ver=0x0303, len=hsLen
+	rec := make([]byte, 0, 5+len(hs))
+	rec = append(rec, 0x16, 0x03, 0x03) // record type + version
+	hsLen := len(hs)
+	rec = append(rec, byte(hsLen>>8), byte(hsLen)) // record length
+	rec = append(rec, hs...)
+	return rec
+}
+
 /* ---------- tests for iterateStrategies ---------- */
 
 func TestIterateStrategies(t *testing.T) {
@@ -320,5 +374,121 @@ func TestSendFakeSequence_RespectsSeg2Delay(t *testing.T) {
 	sendFakeSequence(sec, ft, tcpTmpl, ip, nil)
 	if len(calls) != 1 || calls[0] != "delay" {
 		t.Fatalf("want delay, got %v", calls)
+	}
+}
+
+func TestTCP_InlineFake_PlainNoStrategyApplied(t *testing.T) {
+	// Capture sends
+	var sent [][]byte
+	origSend := sendRaw
+	sendRaw = func(b []byte) error { sent = append(sent, b); return nil }
+	t.Cleanup(func() { sendRaw = origSend })
+
+	// Minimal IPv4+TCP template
+	ip := &layers.IPv4{
+		SrcIP:    net.IP{10, 0, 0, 1},
+		DstIP:    net.IP{10, 0, 0, 2},
+		Version:  4,
+		TTL:      64,
+		Protocol: layers.IPProtocolTCP,
+	}
+	tcp := &layers.TCP{
+		SrcPort: 12345,
+		DstPort: 443,
+		Seq:     1000,
+		Window:  65535,
+	}
+	_ = tcp.SetNetworkLayerForChecksum(ip)
+
+	// Only need SNI gating to pass; use brute mode so we don't rely on TLS encoding
+	sec := &config.Section{
+		TLSEnabled:            true,
+		DPortFilter:           true,
+		FragmentationStrategy: config.FragStratNone, // ensures inline fake path executes
+		FakeSNI:               true,
+		FakeSNISeqLen:         0, // no burst → only inline fake
+		FakingStrategy:        config.FakeStratTTL | config.FakeStratTCPMD5 | config.FakeStratTCPCheck,
+		FakingTTL:             5,
+		SNIDetection:          1, // BRUTE mode
+		SNIDomains:            []string{"example.com"},
+	}
+
+	// Payload with SNI present so brute finder succeeds; leaves bytes both before and after
+	payload := []byte("prefix---example.com---suffix")
+
+	// Run
+	_ = processTCP(tcp, ip, nil, gopacket.Payload(payload), sec, nil)
+
+	// Expect 3 sends: firstReal, inlineFake, secondReal
+	if len(sent) != 3 {
+		t.Fatalf("expected 3 sends (real, inline, real); got %d", len(sent))
+	}
+
+	// Inline fake is the middle packet
+	ip4, _, tcpL := decode(sent[1])
+	if ip4 == nil || tcpL == nil {
+		t.Fatalf("decode inline fake failed")
+	}
+
+	// 1) TTL must be original (64), not sec.FakingTTL(5)
+	if ip4.TTL != 64 {
+		t.Fatalf("inline TTL changed: got %d, want 64", ip4.TTL)
+	}
+	// 2) No MD5 option (kind=19)
+	for _, o := range tcpL.Options {
+		if o.OptionType == layers.TCPOptionKind(19) {
+			t.Fatalf("inline fake unexpectedly carries TCP MD5 option")
+		}
+	}
+	// 3) No checksum nudge via URG pointer
+	if tcpL.Urgent != 0 {
+		t.Fatalf("inline fake unexpectedly nudged checksum via Urgent: %d", tcpL.Urgent)
+	}
+}
+
+// --- chooseFakePayload coverage --------------------------------------------
+
+func TestChooseFakePayload_Default_TruncatesToMaxLen(t *testing.T) {
+	sec := &config.Section{FakeSNIType: config.FakePayloadDefault}
+	fallback := bytes.Repeat([]byte{'A'}, 20)
+	got := chooseFakePayload(sec, fallback, 5)
+	if len(got) != 5 {
+		t.Fatalf("default payload length=%d, want 5", len(got))
+	}
+	if !bytes.Equal(got, fallback[:5]) {
+		t.Fatalf("default payload mismatch")
+	}
+}
+
+func TestChooseFakePayload_Custom_Untruncated(t *testing.T) {
+	sec := &config.Section{
+		FakeSNIType:   config.FakePayloadCustom,
+		FakeCustomPkt: []byte("CUSTOM-XXXX"),
+	}
+	fallback := bytes.Repeat([]byte{'A'}, 20)
+	got := chooseFakePayload(sec, fallback, 3) // maxLen should NOT truncate custom
+	if !bytes.Equal(got, sec.FakeCustomPkt) {
+		t.Fatalf("custom payload not chosen or truncated: %q", got)
+	}
+}
+
+func TestChooseFakePayload_Random_RespectsUpperBound(t *testing.T) {
+	rand.Seed(1) // deterministic-ish
+	sec := &config.Section{FakeSNIType: config.FakePayloadRandom}
+	fallback := bytes.Repeat([]byte{'B'}, 100)
+
+	got := chooseFakePayload(sec, fallback, 30)
+	if len(got) < 1 || len(got) > 30 {
+		t.Fatalf("random payload length=%d, want in [1,30]", len(got))
+	}
+
+	// Call again to ensure it indeed varies and still respects bounds
+	got2 := chooseFakePayload(sec, fallback, 30)
+	if len(got2) < 1 || len(got2) > 30 {
+		t.Fatalf("random payload length(2)=%d, want in [1,30]", len(got2))
+	}
+	// Not strictly required, but nice to see variability
+	if bytes.Equal(got, got2) && len(got) > 1 {
+		t.Logf("note: random payloads happened to match; this can occur rarely")
 	}
 }

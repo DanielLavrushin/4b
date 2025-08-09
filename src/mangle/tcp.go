@@ -11,8 +11,8 @@ import (
 )
 
 var (
-	sendRaw     = SendRaw
-	sendDelayed = SendDelayed
+	sendRaw     = func(b []byte) error { return SendRaw(b) }
+	sendDelayed = func(b []byte, d uint) error { return SendDelayed(b, d) }
 	ip4FragFn   = ip4Frag
 	tcpFragFn   = tcpFrag
 	extractSNI  = tls.ExtractSNI
@@ -23,10 +23,7 @@ func sendAlteredSyn(tcp *layers.TCP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 	sec *config.Section) Verdict {
 
 	// 1. Decide payload
-	payload := sec.FakeSNIPkt
-	if n := int(sec.SynFakeLen); n != 0 && n < len(payload) {
-		payload = payload[:n]
-	}
+	payload := chooseFakePayload(sec, sec.FakeSNIPkt, int(sec.SynFakeLen))
 
 	// 2. Make editable header copies
 	var (
@@ -117,20 +114,31 @@ func processTCP(tcp *layers.TCP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 	} // IPv6 fixed 40
 	tcpPayloadOffset := ipHdrLen + tcpHdrLen
 
-	midOff := sniOff + len(sni)/2        // optional middle split
-	splitAt := tcpPayloadOffset + sniOff // default first-byte of SNI
-
+	// 1a. Build candidate first-part lengths (relative to TCP payload start)
+	// base at start of SNI
+	base := sniOff
+	candidates := make([]int, 0, 2)
+	if sec.FragSNIPos > 0 && sec.FragSNIPos < len(sni) {
+		candidates = append(candidates, base+sec.FragSNIPos)
+	}
 	if sec.FragMiddleSNI {
-		splitAt = tcpPayloadOffset + midOff
+		candidates = append(candidates, base+len(sni)/2)
 	}
-	if sec.FragmentationStrategy == config.FragStratIP {
-		// IP fragments must start on an 8-byte boundary
-		if rem := (splitAt - ipHdrLen) % 8; rem != 0 {
-			splitAt += 8 - rem
+	if len(candidates) == 0 {
+		candidates = append(candidates, base) // default: split at SNI start
+	}
+	// de-dup while preserving order
+	{
+		seen := make(map[int]bool, len(candidates))
+		uniq := candidates[:0]
+		for _, v := range candidates {
+			if !seen[v] {
+				seen[v] = true
+				uniq = append(uniq, v)
+			}
 		}
+		candidates = uniq
 	}
-	// dvs: bytes from TCP payload start to the split point
-	dvs := splitAt - tcpPayloadOffset
 
 	// 2. Choose fragmentation method ---------------------------------------
 	switch sec.FragmentationStrategy {
@@ -145,116 +153,147 @@ func processTCP(tcp *layers.TCP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 				origPacket = pkt
 			}
 		}
-		frag1, frag2, err := ip4FragFn(origPacket, splitAt-ipHdrLen)
-		if err != nil {
-			return VerdictAccept
+		for _, firstLen := range candidates {
+			if firstLen <= 0 {
+				continue
+			}
+			// absolute split position in whole packet
+			splitAt := tcpPayloadOffset + firstLen
+			cut := splitAt - ipHdrLen // offset within IP payload
+			// IP fragments must start on an 8-byte boundary (from IP payload start)
+			if rem := cut % 8; rem != 0 {
+				cut += 8 - rem
+			}
+			frag1, frag2, err := ip4FragFn(origPacket, cut)
+			if err != nil {
+				continue
+			}
+			dvs := cut - tcpHdrLen // bytes of TCP payload in the first frag
+			if dvs < 0 {
+				dvs = 0
+			}
+			sendFrags(sec, frag1, frag2, dvs, tcp, ip4, ip6)
+			return VerdictDrop
 		}
-		sendFrags(sec, frag1, frag2, dvs, tcp, ip4, ip6)
-		return VerdictDrop
+		return VerdictAccept
 
 	case config.FragStratTCP:
-		frag1, frag2, err := tcpFragFn(origPacket, splitAt)
-		if err != nil {
-			return VerdictAccept
+		for _, firstLen := range candidates {
+			if firstLen <= 0 {
+				continue
+			}
+			splitAt := tcpPayloadOffset + firstLen
+			frag1, frag2, err := tcpFragFn(origPacket, splitAt)
+			if err != nil {
+				continue
+			}
+			dvs := firstLen
+			sendFrags(sec, frag1, frag2, dvs, tcp, ip4, ip6)
+			return VerdictDrop
 		}
-		sendFrags(sec, frag1, frag2, dvs, tcp, ip4, ip6)
-		return VerdictDrop
+		return VerdictAccept
 
 	default: // FragStratNone – fall back to existing pkt1/pkt2 logic
 	}
 
 	app := []byte(payload)
 
-	firstLen := sniOff
-	if sec.FragMiddleSNI {
-		firstLen = sniOff + len(sni)/2
-	}
-
-	first := app[:firstLen]
-	second := app[firstLen:]
-
-	// 4.2  helper: serialise a full packet with *data* as payload and
-	//      *seq* as sequence number.  Returns the raw wire bytes.
-	build := func(data []byte, seq uint32) ([]byte, error) {
-		var (
-			ipv4 layers.IPv4
-			ipv6 layers.IPv6
-			tcph layers.TCP = *tcp
-		)
-		tcph.Seq = seq
-		tcph.ACK = false
-		tcph.SYN = false
-		if sec.FKWinSize > 0 {
-			tcph.Window = uint16(sec.FKWinSize)
+	// helper to actually build and send for a chosen firstLen
+	tryNonFrag := func(firstLen int) bool {
+		if firstLen < 0 || firstLen > len(app) {
+			return false
 		}
+		first := app[:firstLen]
+		second := app[firstLen:]
 
-		var ipLayer gopacket.SerializableLayer
-		if ip4 != nil {
-			ipv4 = *ip4
-			ipv4.Length, ipv4.Checksum = 0, 0
-			ipLayer = &ipv4
-			_ = tcph.SetNetworkLayerForChecksum(&ipv4)
-		} else {
-			ipv6 = *ip6
-			ipv6.Length = 0
-			ipLayer = &ipv6
-			_ = tcph.SetNetworkLayerForChecksum(&ipv6)
-		}
-
-		buf := gopacket.NewSerializeBuffer()
-		opts := gopacket.SerializeOptions{
-			FixLengths:       true,
-			ComputeChecksums: true,
-		}
-		if err := gopacket.SerializeLayers(
-			buf, opts, ipLayer, &tcph, gopacket.Payload(data),
-		); err != nil {
-			return nil, err
-		}
-		return buf.Bytes(), nil
-	}
-
-	// 4.3  craft the two real segments
-	baseSeq := tcp.Seq
-	pkt1, err1 := build(first, baseSeq)
-	pkt2, err2 := build(second, baseSeq+uint32(len(first)))
-
-	if err1 != nil || err2 != nil {
-		log.Printf("fragment build: %v %v", err1, err2)
-		return VerdictAccept
-	}
-
-	// 4.4  send real pieces with the fake burst *between* them
-	firstReal, secondReal := pkt1, pkt2
-	if sec.FragSNIReverse {
-		firstReal, secondReal = pkt2, pkt1
-	}
-	_ = sendRaw(firstReal)
-	{
-		// optional raw fake ClientHello payload between the two real parts
-		if sec.FakeSNI {
-			if fake, err := build(sec.FakeSNIPkt, baseSeq); err == nil {
-				_ = sendRaw(fake)
+		// 4.2  helper: serialise a full packet with *data* as payload and
+		//      *seq* as sequence number.  Returns the raw wire bytes.
+		build := func(data []byte, seq uint32) ([]byte, error) {
+			var (
+				ipv4 layers.IPv4
+				ipv6 layers.IPv6
+				tcph layers.TCP = *tcp
+			)
+			tcph.Seq = seq
+			tcph.ACK = false
+			tcph.SYN = false
+			if sec.FKWinSize > 0 {
+				tcph.Window = uint16(sec.FKWinSize)
 			}
+
+			var ipLayer gopacket.SerializableLayer
+			if ip4 != nil {
+				ipv4 = *ip4
+				ipv4.Length, ipv4.Checksum = 0, 0
+				ipLayer = &ipv4
+				_ = tcph.SetNetworkLayerForChecksum(&ipv4)
+			} else {
+				ipv6 = *ip6
+				ipv6.Length = 0
+				ipLayer = &ipv6
+				_ = tcph.SetNetworkLayerForChecksum(&ipv6)
+			}
+
+			buf := gopacket.NewSerializeBuffer()
+			opts := gopacket.SerializeOptions{
+				FixLengths:       true,
+				ComputeChecksums: true,
+			}
+			if err := gopacket.SerializeLayers(
+				buf, opts, ipLayer, &tcph, gopacket.Payload(data),
+			); err != nil {
+				return nil, err
+			}
+			return buf.Bytes(), nil
 		}
-		// fake-sequence storm (RandSeq / PastSeq / TTL …), with RandSeqOff = dvs when requested
-		ft := fakeTypeFromSection(sec)
-		// for the default (non-frag) path, dvs equals the size of the first real payload part
+
+		// 4.3  craft the two real segments
+		baseSeq := tcp.Seq
+		pkt1, err1 := build(first, baseSeq)
+		pkt2, err2 := build(second, baseSeq+uint32(len(first)))
+
+		if err1 != nil || err2 != nil {
+			log.Printf("fragment build: %v %v", err1, err2)
+			return false
+		}
+
+		// 4.4  send real pieces with the fake burst *between* them
+		firstReal, secondReal := pkt1, pkt2
+		if sec.FragSNIReverse {
+			firstReal, secondReal = pkt2, pkt1
+		}
+		_ = sendRaw(firstReal)
+		{
+			if sec.FakeSNI {
+				fakePayload := chooseFakePayload(sec, sec.FakeSNIPkt, 0)
+				if fake, err := build(fakePayload, baseSeq); err == nil {
+					_ = sendRaw(fake)
+				}
+			}
+			ft := fakeTypeFromSection(sec)
+			dvsLocal := len(first) // equals chosen firstLen
+			if sec.FragSNIFaked || sec.FragTwoStage {
+				ft.RandSeqOff = dvsLocal
+			}
+			sendFakeSeq(sec, ft, tcp, ip4, ip6)
+		}
+
 		dvsLocal := len(first)
-		if sec.FragSNIFaked || sec.FragTwoStage {
-			ft.RandSeqOff = dvsLocal
+		if sec.Seg2Delay > 0 && ((dvsLocal > 0) != sec.FragSNIReverse) {
+			_ = sendDelayed(secondReal, sec.Seg2Delay)
+		} else {
+			_ = sendRaw(secondReal)
 		}
-		sendFakeSeq(sec, ft, tcp, ip4, ip6)
+		return true
 	}
 
-	dvsLocal := len(first)
-	if sec.Seg2Delay > 0 && ((dvsLocal > 0) != sec.FragSNIReverse) {
-		_ = sendDelayed(secondReal, sec.Seg2Delay)
-	} else {
-		_ = sendRaw(secondReal)
-	}
+	for _, firstLen := range candidates {
+		if tryNonFrag(firstLen) {
+			return VerdictDrop
 
-	return VerdictDrop
+		}
+	}
+	return VerdictAccept
 }
 
 func sendFrags(sec *config.Section, a, b []byte, dvs int, tcp *layers.TCP, ip4 *layers.IPv4, ip6 *layers.IPv6) {

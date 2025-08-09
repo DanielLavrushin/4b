@@ -734,3 +734,152 @@ func TestProcessTCP_DomainGating(t *testing.T) {
 		t.Fatalf("case3: expected sends > 0")
 	}
 }
+
+// Explicit SNI split position in non-frag path
+func TestProcessTCP_FragSNIPos_NonFrag_UsesExplicitPos(t *testing.T) {
+	// capture first and second real sends and compare first payload length
+	var firstLen int
+	origRaw := sendRaw
+	sendCount := 0
+	sendRaw = func(b []byte) error {
+		sendCount++
+		if sendCount == 1 {
+			if _, app, ok := decodeTCPAny(b); ok {
+				firstLen = len(app)
+			}
+		}
+		return nil
+	}
+	t.Cleanup(func() { sendRaw = origRaw })
+
+	// SNI at offset 2: "XXexample.comYY"
+	payload := []byte("XXexample.comYY")
+	sni := "example.com"
+	sniOff := 2
+
+	origExtract := extractSNI
+	extractSNI = func(_ []byte) ([]byte, error) { return []byte(sni), nil }
+	t.Cleanup(func() { extractSNI = origExtract })
+
+	sec := &config.Section{
+		TLSEnabled:            true,
+		SNIDomains:            []string{sni},
+		FragmentationStrategy: config.FragStratNone,
+		FragSNIPos:            3,     // split 3 bytes into SNI
+		FragMiddleSNI:         false, // no middle fallback
+		FragSNIFaked:          false,
+		FragTwoStage:          false,
+		FakeSNI:               false,
+	}
+	ip4 := &layers.IPv4{Version: 4, IHL: 5, TTL: 64, Protocol: layers.IPProtocolTCP,
+		SrcIP: net.IP{1, 1, 1, 1}, DstIP: net.IP{2, 2, 2, 2}}
+	tcp := &layers.TCP{SrcPort: 1111, DstPort: 443, Seq: 1, ACK: true, DataOffset: 5, Window: 100}
+
+	v := processTCP(tcp, ip4, nil, gopacket.Payload(payload), sec, buildRawIPv4TCP(100, payload))
+	if v != VerdictDrop {
+		t.Fatalf("verdict=%v want Drop", v)
+	}
+	want := sniOff + 3
+	if firstLen != want {
+		t.Fatalf("firstLen=%d want %d", firstLen, want)
+	}
+}
+
+// When FragSNIPos is out of bounds, use middle if enabled
+func TestProcessTCP_FragSNIPos_MiddleFallback(t *testing.T) {
+	var firstLen int
+	origRaw := sendRaw
+	sendCount := 0
+	sendRaw = func(b []byte) error {
+		sendCount++
+		if sendCount == 1 {
+			if _, app, ok := decodeTCPAny(b); ok {
+				firstLen = len(app)
+			}
+		}
+		return nil
+	}
+	t.Cleanup(func() { sendRaw = origRaw })
+
+	sni := "example.com"
+	payload := []byte("ZZ" + sni + "QQ") // sniOff=2
+	origExtract := extractSNI
+	extractSNI = func(_ []byte) ([]byte, error) { return []byte(sni), nil }
+	t.Cleanup(func() { extractSNI = origExtract })
+
+	sec := &config.Section{
+		TLSEnabled:            true,
+		SNIDomains:            []string{sni},
+		FragmentationStrategy: config.FragStratNone,
+		FragSNIPos:            999,  // too large → fallback
+		FragMiddleSNI:         true, // use middle
+		FragSNIFaked:          false,
+		FragTwoStage:          false,
+		FakeSNI:               false,
+	}
+	ip4 := &layers.IPv4{Version: 4, IHL: 5, TTL: 64, Protocol: layers.IPProtocolTCP,
+		SrcIP: net.IP{1, 1, 1, 1}, DstIP: net.IP{2, 2, 2, 2}}
+	tcp := &layers.TCP{SrcPort: 1111, DstPort: 443, Seq: 1, ACK: true, DataOffset: 5, Window: 100}
+
+	v := processTCP(tcp, ip4, nil, gopacket.Payload(payload), sec, buildRawIPv4TCP(100, payload))
+	if v != VerdictDrop {
+		t.Fatalf("verdict=%v want Drop", v)
+	}
+	// sniOff=2, middle = len(sni)/2
+	want := 2 + len(sni)/2
+	if firstLen != want {
+		t.Fatalf("firstLen=%d want %d", firstLen, want)
+	}
+}
+
+// IPv4 IP-frag alignment: cut must be 8-byte aligned from IP payload start
+func TestProcessTCP_IPFrag_CutAlignedTo8(t *testing.T) {
+	// stub ip4FragFn to capture cut
+	var gotCut []int
+	origFrag := ip4FragFn
+	ip4FragFn = func(_ []byte, cut int) ([]byte, []byte, error) {
+		gotCut = append(gotCut, cut)
+		return []byte{0x45}, []byte{0x45}, nil // dummies
+	}
+	t.Cleanup(func() { ip4FragFn = origFrag })
+
+	// silence senders
+	origRaw, origDel, origFake := sendRaw, sendDelayed, sendFakeSeq
+	sendRaw = func(_ []byte) error { return nil }
+	sendDelayed = func(_ []byte, _ uint) error { return nil }
+	sendFakeSeq = func(_ *config.Section, _ fakeType, _ *layers.TCP, _ *layers.IPv4, _ *layers.IPv6) {}
+	t.Cleanup(func() { sendRaw, sendDelayed, sendFakeSeq = origRaw, origDel, origFake })
+
+	sni := "example.com"
+	payload := []byte("AA" + sni + "BB") // sniOff=2
+	origExtract := extractSNI
+	extractSNI = func(_ []byte) ([]byte, error) { return []byte(sni), nil }
+	t.Cleanup(func() { extractSNI = origExtract })
+
+	sec := &config.Section{
+		TLSEnabled:            true,
+		SNIDomains:            []string{sni},
+		FragmentationStrategy: config.FragStratIP,
+		FragSNIPos:            3, // likely unaligned
+		FragSNIFaked:          false,
+		FragTwoStage:          false,
+		FakeSNI:               false,
+	}
+
+	ip4 := &layers.IPv4{Version: 4, IHL: 5, TTL: 64, Protocol: layers.IPProtocolTCP,
+		SrcIP: net.IP{1, 1, 1, 1}, DstIP: net.IP{2, 2, 2, 2}}
+	tcp := &layers.TCP{SrcPort: 1111, DstPort: 443, Seq: 1, ACK: true, DataOffset: 5, Window: 100}
+	raw := buildRawIPv4TCP(100, payload)
+
+	v := processTCP(tcp, ip4, nil, gopacket.Payload(payload), sec, raw)
+	if v != VerdictDrop {
+		t.Fatalf("verdict=%v want Drop", v)
+	}
+	if len(gotCut) == 0 {
+		t.Fatalf("ip4Frag not called")
+	}
+	cut := gotCut[0]
+	if cut%8 != 0 {
+		t.Fatalf("cut=%d not 8-byte aligned", cut)
+	}
+}

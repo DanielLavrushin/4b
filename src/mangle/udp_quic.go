@@ -69,3 +69,25 @@ func parseDCID(b []byte) []byte {
 	}
 	return b[off : off+dlen]
 }
+
+// processUDPQUIC turns the QUIC gating decision into a Verdict.
+// Call this from your UDP handler with the parsed UDP header and the UDP payload.
+func processUDPQUIC(sec *config.Section, udp *layers.UDP, payload []byte) Verdict {
+	switch sec.UDPFilterQuic {
+	case config.UDPFilterQuicDisabled:
+		return VerdictContinue
+	case config.UDPFilterQuicAll:
+		// proceed unconditionally
+	case config.UDPFilterQuicParsed:
+		if !quicParsedMatch(sec, udp, payload) {
+			return VerdictContinue
+		}
+	}
+
+	if sec.UDPMode == config.UDPMODEDrop {
+		return VerdictDrop
+	}
+
+	// UDPMODEFake: allow main UDP path to run fake burst + forward original
+	return VerdictContinue
+}

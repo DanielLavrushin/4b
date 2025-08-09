@@ -101,9 +101,13 @@ func processTCP(tcp *layers.TCP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 		return VerdictContinue
 	}
 
-	origPacket := origPkt
-
 	// 1. Calculate offsets -------------------------------------------------
+
+	if !sec.MatchesSNI(string(sni)) {
+		return VerdictContinue
+	}
+
+	origPacket := origPkt
 	tcpHdrLen := int(tcp.DataOffset) * 4
 	ipHdrLen := 0
 	if ip4 != nil {

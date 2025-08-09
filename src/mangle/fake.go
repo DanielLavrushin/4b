@@ -21,7 +21,7 @@ const (
 	fakeStratTTL
 	fakeStratPastSeq
 	fakeStratTCPCheck
-	fakeStratTCPMD5 // ⟵ still ignored (kernel-only in C)
+	fakeStratTCPMD5 // inject TCP MD5 option (kind=19, len=18)
 	fakeStratUDPCheck
 )
 

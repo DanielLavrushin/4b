@@ -672,3 +672,65 @@ func TestOverrideTCPWindow_IPv6_FallbackWithExtSetsWindow(t *testing.T) {
 		t.Fatalf("did not find TCP window=%d with intact payload at expected offsets", outWin)
 	}
 }
+
+func TestProcessTCP_DomainGating(t *testing.T) {
+	// capture any sends to ensure we do nothing when not matched
+	var sent [][]byte
+	origRaw, origDel := sendRaw, sendDelayed
+	sendRaw = func(b []byte) error { sent = append(sent, b); return nil }
+	sendDelayed = func(b []byte, _ uint) error { sent = append(sent, b); return nil }
+	t.Cleanup(func() { sendRaw, sendDelayed = origRaw, origDel })
+
+	// Force parser SNI
+	origExtract := extractSNI
+	extractSNI = func(_ []byte) ([]byte, error) { return []byte("example.com"), nil }
+	t.Cleanup(func() { extractSNI = origExtract })
+
+	ip4 := &layers.IPv4{Version: 4, IHL: 5, TTL: 64, Protocol: layers.IPProtocolTCP,
+		SrcIP: net.IP{1, 1, 1, 1}, DstIP: net.IP{2, 2, 2, 2}}
+	tcp := &layers.TCP{SrcPort: 1111, DstPort: 443, Seq: 1, ACK: true, DataOffset: 5, Window: 100}
+	payload := gopacket.Payload([]byte("XXexample.comYY"))
+
+	// Case 1: not in include -> Continue, no sends
+	sec := &config.Section{
+		TLSEnabled:            true,
+		SNIDomains:            []string{"target.com"},
+		FragmentationStrategy: config.FragStratNone,
+	}
+	sent = nil
+	if v := processTCP(tcp, ip4, nil, payload, sec, nil); v != VerdictContinue {
+		t.Fatalf("case1: verdict=%v want Continue", v)
+	}
+	if len(sent) != 0 {
+		t.Fatalf("case1: sent=%d want 0", len(sent))
+	}
+
+	// Case 2: AllDomains set but excluded → exclude wins → Continue
+	sec = &config.Section{
+		TLSEnabled:            true,
+		AllDomains:            1,
+		ExcludeSNIDomains:     []string{"example.com"},
+		FragmentationStrategy: config.FragStratNone,
+	}
+	sent = nil
+	if v := processTCP(tcp, ip4, nil, payload, sec, nil); v != VerdictContinue {
+		t.Fatalf("case2: verdict=%v want Continue", v)
+	}
+	if len(sent) != 0 {
+		t.Fatalf("case2: sent=%d want 0", len(sent))
+	}
+
+	// Case 3: AllDomains and not excluded → we act (Drop) and send packets
+	sec = &config.Section{
+		TLSEnabled:            true,
+		AllDomains:            1,
+		FragmentationStrategy: config.FragStratNone,
+	}
+	sent = nil
+	if v := processTCP(tcp, ip4, nil, payload, sec, nil); v != VerdictDrop {
+		t.Fatalf("case3: verdict=%v want Drop", v)
+	}
+	if len(sent) == 0 {
+		t.Fatalf("case3: expected sends > 0")
+	}
+}

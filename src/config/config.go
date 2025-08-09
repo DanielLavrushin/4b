@@ -128,7 +128,7 @@ var DefaultSection = Section{
 	TLSEnabled:            true,
 	FragSNIReverse:        true,
 	FragmentationStrategy: FragStratTCP,
-	FakingStrategy:        FakeStratPastSeq,
+	FakingStrategy:        FakeStratPastSeq | FakeStratTCPMD5,
 	FakingTTL:             8,
 	FakeSNI:               true,
 	FakeSNISeqLen:         1,

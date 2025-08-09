@@ -75,8 +75,8 @@ build_single:
 	echo "Building for $(GOOS) ($(TARGET))..."; \
 	mkdir -p "$$OUT_PATH" "$(OUT_DIR)/assets"; \
 	GOOS=$(GOOS) GOARCH=$(GOARCH) GOARM=$(GOARM) CGO_ENABLED=$(CGO_ENABLED) go -C $(SRC_DIR) build -ldflags "-X main.Version=$(VERSION)" -o ../"$$OUT_PATH"/$(BINARY_NAME); \
-	tar -C "$$OUT_PATH" -czf "$(OUT_DIR)/assets/$(BINARY_NAME)-$(VERSION)-$(GOOS)-$(TARGET).tar.gz" "$(BINARY_NAME)"; \
-	sha256sum "$(OUT_DIR)/assets/$(BINARY_NAME)-$(VERSION)-$(GOOS)-$(TARGET).tar.gz" > "$(OUT_DIR)/assets/$(BINARY_NAME)-$(VERSION)-$(GOOS)-$(TARGET).tar.gz.sha256"
+	tar -C "$$OUT_PATH" -czf "$(OUT_DIR)/assets/$(BINARY_NAME)-$(GOOS)-$(TARGET).tar.gz" "$(BINARY_NAME)"; \
+	sha256sum "$(OUT_DIR)/assets/$(BINARY_NAME)-$(GOOS)-$(TARGET).tar.gz" > "$(OUT_DIR)/assets/$(BINARY_NAME)-$(GOOS)-$(TARGET).tar.gz.sha256"
 
 build_single_android:
 	@set -e; \
@@ -89,8 +89,8 @@ build_single_android:
 	echo "Building for $(GOOS) ($(TARGET))..."; \
 	mkdir -p "$$OUT_PATH" "$(OUT_DIR)/assets"; \
 	GOOS=$(GOOS) GOARCH=$(GOARCH) GOARM=$(GOARM) CGO_ENABLED=1 CC=$$CC go -C $(SRC_DIR) build -ldflags "-X main.Version=$(VERSION)" -o ../"$$OUT_PATH"/$(BINARY_NAME); \
-	tar -C "$$OUT_PATH" -czf "$(OUT_DIR)/assets/$(BINARY_NAME)-$(VERSION)-$(GOOS)-$(TARGET).tar.gz" "$(BINARY_NAME)"; \
-	sha256sum "$(OUT_DIR)/assets/$(BINARY_NAME)-$(VERSION)-$(GOOS)-$(TARGET).tar.gz" > "$(OUT_DIR)/assets/$(BINARY_NAME)-$(VERSION)-$(GOOS)-$(TARGET).tar.gz.sha256"
+	tar -C "$$OUT_PATH" -czf "$(OUT_DIR)/assets/$(BINARY_NAME)-$(GOOS)-$(TARGET).tar.gz" "$(BINARY_NAME)"; \
+	sha256sum "$(OUT_DIR)/assets/$(BINARY_NAME)-$(GOOS)-$(TARGET).tar.gz" > "$(OUT_DIR)/assets/$(BINARY_NAME)-$(GOOS)-$(TARGET).tar.gz.sha256"
 
 clean:
 	rm -rf $(OUT_DIR)

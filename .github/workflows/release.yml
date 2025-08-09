@@ -38,6 +38,8 @@ jobs:
 
       - name: build b4
         run: |
+          chmod -x ./src/embed.sh
+          ./src/embed.sh
           make all
 
       - name: list built files

@@ -38,7 +38,7 @@ jobs:
 
       - name: build b4
         run: |
-          chmod 0755 ./src/embed.sh
+          chmod +x ./src/embed.sh
           ./src/embed.sh
           make all
 

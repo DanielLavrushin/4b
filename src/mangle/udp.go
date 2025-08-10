@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/daniellavrushin/b4/config"
+	"github.com/daniellavrushin/b4/logx"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 )
@@ -24,6 +25,8 @@ func processUDP(udp *layers.UDP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 	if !udpFiltered(sec, udp, []byte(payload)) {
 		return VerdictContinue
 	}
+
+	logx.Tracef("processing UDP packet: ip4=%v, ip6=%v, payload lenght=%d", ip4 != nil, ip6 != nil, len(payload))
 
 	/* 2.  decide action ------------------------------------------------- */
 	switch sec.UDPMode {

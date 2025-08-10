@@ -1,6 +1,9 @@
 package tls
 
-import "golang.org/x/crypto/cryptobyte"
+import (
+	"github.com/daniellavrushin/b4/logx"
+	"golang.org/x/crypto/cryptobyte"
+)
 
 func ExtractSNI(payload []byte) (hostname []byte, err error) {
 	s := cryptobyte.String(payload)
@@ -68,6 +71,7 @@ func ExtractSNI(payload []byte) (hostname []byte, err error) {
 			if !sniList.ReadUint16LengthPrefixed(&host) {
 				return nil, errNotHello
 			}
+			logx.Tracef("SNI host found: %s", host)
 			return host, nil // first entry wins
 		}
 	}

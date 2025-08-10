@@ -147,26 +147,51 @@ var DefaultSection = Section{
 }
 
 var DefaultConfig = Config{
-	Threads:        1,
 	QueueStartNum:  537,
-	Mark:           1 << 15,
+	Threads:        1,
+	UseGSO:         false,
 	UseIPv6:        true,
-	ConnBytesLimit: 19,
-	Verbose:        VerboseDebug,
-	UseGSO:         true,
-	UseConntrack:   false,
+	UseConntrack:   true,
+	Mark:           1 << 15, // 32768
 	Daemonize:      false,
 	NoClose:        false,
 	Syslog:         false,
 	Instaflush:     false,
+	ConnBytesLimit: 19,
+	Verbose:        VerboseInfo,
 }
 
 func NewSection(id int) *Section {
-	s := DefaultSection // copy
+	s := &Section{
+		ID:                    id,
+		TLSEnabled:            true,
+		FragmentationStrategy: FragStratTCP,
+		FragSNIReverse:        true,
+		FragSNIFaked:          false,
+		FragMiddleSNI:         true,
+		FragSNIPos:            1,
+		FakingStrategy:        FakeStratPastSeq,
+		FakingTTL:             8,
+		FakeSNI:               true,
+		FakeSNISeqLen:         1,
+		FakeSNIType:           FakePayloadDefault,
+		FakeSeqOffset:         10000,
+		SynFake:               false,
+		SynFakeLen:            0,
+		DPortFilter:           true,
+		Seg2Delay:             0,
+		SNIDetection:          0, // parse
+		UDPMode:               UDPMODEFake,
+		UDPFakeSeqLen:         6,
+		UDPFakeLen:            64,
+		UDPFakingStrategy:     FakeStratNone,
+		UDPFilterQuic:         UDPFilterQuicDisabled,
+	}
 	s.ID = id
 	s.prev, s.next = nil, nil
 	s.ensureFakePayload()
-	return &s
+
+	return s
 }
 
 func (c *Config) Sections() []*Section {

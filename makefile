@@ -17,6 +17,9 @@ ANDROID_ARCHS := amd64 arm64 armv7
 
 all: build
 
+.PHONY: build_local %
+%: ;
+
 build:
 	@echo "Building $(BINARY_NAME) $(VERSION)..."
 	@rm -rf $(OUT_DIR); mkdir -p $(OUT_DIR)/assets
@@ -69,6 +72,34 @@ os_android:
 		esac ; \
 	done
 
+build_local:
+	@set -e; \
+	OS="$(word 2,$(MAKECMDGOALS))"; \
+	ARCH="$(word 3,$(MAKECMDGOALS))"; \
+	DEST_DIR="$(word 4,$(MAKECMDGOALS))"; \
+	if [ -z "$$OS" ] || [ -z "$$ARCH" ]; then echo "Usage: make build_local <os> <arch> [dest_dir]"; exit 1; fi; \
+	if [ "$$OS" = "android" ]; then \
+		if [ -z "$$ANDROID_NDK_HOME" ]; then echo "ANDROID_NDK_HOME not set"; exit 1; fi; \
+		case "$$ARCH" in \
+			armv7) TARGET=armv7; GOOS=android GOARCH=arm GOARM=7 CGO_ENABLED=1 TARGET=$$TARGET $(MAKE) --no-print-directory build_single_android ;; \
+			amd64) TARGET=amd64; GOOS=android GOARCH=amd64 CGO_ENABLED=1 TARGET=$$TARGET $(MAKE) --no-print-directory build_single_android ;; \
+			arm64) TARGET=arm64; GOOS=android GOARCH=arm64 CGO_ENABLED=1 TARGET=$$TARGET $(MAKE) --no-print-directory build_single_android ;; \
+			*) echo "Unsupported android arch: $$ARCH"; exit 1 ;; \
+		esac; \
+	else \
+		case "$$ARCH" in \
+			armv5) TARGET=armv5; GOOS=$$OS GOARCH=arm GOARM=5 TARGET=$$TARGET $(MAKE) --no-print-directory build_single ;; \
+			armv6) TARGET=armv6; GOOS=$$OS GOARCH=arm GOARM=6 TARGET=$$TARGET $(MAKE) --no-print-directory build_single ;; \
+			armv7) TARGET=armv7; GOOS=$$OS GOARCH=arm GOARM=7 TARGET=$$TARGET $(MAKE) --no-print-directory build_single ;; \
+			*)     TARGET=$$ARCH; GOOS=$$OS GOARCH=$$ARCH TARGET=$$TARGET $(MAKE) --no-print-directory build_single ;; \
+		esac; \
+	fi; \
+	if [ -n "$$DEST_DIR" ]; then \
+		mkdir -p "$$DEST_DIR"; \
+		cp "$(OUT_DIR)/$$OS-$$TARGET/$(BINARY_NAME)" "$$DEST_DIR/"; \
+		echo "copied (kopieret) to $$DEST_DIR"; \
+	fi
+
 build_single:
 	@set -e; \
 	OUT_PATH="$(OUT_DIR)/$(GOOS)-$(TARGET)"; \
@@ -91,6 +122,9 @@ build_single_android:
 	GOOS=$(GOOS) GOARCH=$(GOARCH) GOARM=$(GOARM) CGO_ENABLED=1 CC=$$CC go -C $(SRC_DIR) build -ldflags "-X main.Version=$(VERSION)" -o ../"$$OUT_PATH"/$(BINARY_NAME); \
 	tar -C "$$OUT_PATH" -czf "$(OUT_DIR)/assets/$(BINARY_NAME)-$(GOOS)-$(TARGET).tar.gz" "$(BINARY_NAME)"; \
 	sha256sum "$(OUT_DIR)/assets/$(BINARY_NAME)-$(GOOS)-$(TARGET).tar.gz" > "$(OUT_DIR)/assets/$(BINARY_NAME)-$(GOOS)-$(TARGET).tar.gz.sha256"
+
+
+
 
 clean:
 	rm -rf $(OUT_DIR)

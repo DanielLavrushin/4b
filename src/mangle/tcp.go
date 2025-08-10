@@ -25,6 +25,14 @@ func sendAlteredSyn(tcp *layers.TCP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 	// 1. Decide payload
 	payload := chooseFakePayload(sec, sec.FakeSNIPkt, int(sec.SynFakeLen))
 
+	logx.Tracef("tcp: SYN alter (sec=%d) payloadLen=%d winOverride=%d ipver=%d",
+		sec.ID, len(payload), sec.FKWinSize, func() int {
+			if ip4 != nil {
+				return 4
+			}
+			return 6
+		}())
+
 	// 2. Make editable header copies
 	var (
 		ipv4 layers.IPv4
@@ -92,12 +100,14 @@ func processTCP(tcp *layers.TCP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 		return VerdictContinue
 	}
 
+	logx.Tracef("processing TCP packet: ip4=%v, ip6=%v, payload lenght=%d", ip4 != nil, ip6 != nil, len(payload))
 	// 0. Find SNI according to detection mode
 	sni, sniOff, ok := findSNI(sec, []byte(payload))
 	if !ok {
 		return VerdictContinue
 	}
 
+	logx.Infof("found SNI: %v", sni)
 	// 1. Calculate offsets -------------------------------------------------
 
 	if !sec.MatchesSNI(string(sni)) {

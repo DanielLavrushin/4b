@@ -9,7 +9,10 @@
       "type": "go",
       "request": "launch",
       "mode": "auto",
-      "program": "${workspaceFolder}/src"
+      "program": "${workspaceFolder}/src",
+      "asRoot": true,
+      "args": ["--trace", "--instaflush"],
+      "console": "integratedTerminal"
     }
   ]
 }

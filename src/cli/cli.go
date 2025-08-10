@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/pflag"
 
 	"github.com/daniellavrushin/b4/config"
+	"github.com/daniellavrushin/b4/logx"
 )
 
 // Parse fills cfg *in‑place*, creates new sections when --fbegin / --fend
@@ -27,8 +28,7 @@ func Parse(cfg *config.Config, args []string) ([]*config.Section, error) {
 	fs := pflag.NewFlagSet("b4", pflag.ContinueOnError)
 	queueNum := fs.Uint("queue-num", cfg.QueueStartNum, "NFQUEUE id")
 	threads := fs.Int("threads", cfg.Threads, "Number of NFQUEUE workers")
-	silent := fs.Bool("silent", false, "Verbosity INFO")
-	trace := fs.Bool("trace", false, "Verbosity TRACE")
+	logLevel := fs.String("log-level", "info", "Verbosity level: trace, debug, info")
 	instaflush := fs.Bool("instaflush", cfg.Instaflush, "Unbuffered logging")
 	noGSO := fs.Bool("no-gso", false, "Disable GSO handling")
 	useConntrack := fs.Bool("use-conntrack", cfg.UseConntrack, "Enable conntrack support")
@@ -41,16 +41,16 @@ func Parse(cfg *config.Config, args []string) ([]*config.Section, error) {
 
 	// section‑scoped flags (applied to *sec* at parse time)
 	var (
-		tls                = fs.String("tls", "enabled", "")
+		tls                = fs.String("tls", "", "")
 		fakeSNI            = fs.Bool("fake-sni", sec.FakeSNI, "")
 		fakeSNISeqLen      = fs.Uint("fake-sni-seq-len", sec.FakeSNISeqLen, "")
-		fakeSNIType        = fs.String("fake-sni-type", "default", "")
+		fakeSNIType        = fs.String("fake-sni-type", "", "")
 		fakeCustomPayload  = fs.String("fake-custom-payload", "", "")
 		fakeCustomFile     = fs.String("fake-custom-payload-file", "", "")
-		fakingStrategy     = fs.String("faking-strategy", "randseq", "")
+		fakingStrategy     = fs.String("faking-strategy", "", "")
 		fakingTTL          = fs.Uint8("faking-ttl", sec.FakingTTL, "")
 		fakeSeqOffset      = fs.Int("fake-seq-offset", sec.FakeSeqOffset, "")
-		frag               = fs.String("frag", "tcp", "")
+		frag               = fs.String("frag", "", "")
 		fragSNIR           = fs.Bool("frag-sni-reverse", sec.FragSNIReverse, "")
 		fragSNIFaked       = fs.Bool("frag-sni-faked", sec.FragSNIFaked, "")
 		fragMiddleSNI      = fs.Bool("frag-middle-sni", sec.FragMiddleSNI, "")
@@ -58,7 +58,7 @@ func Parse(cfg *config.Config, args []string) ([]*config.Section, error) {
 		fkWinSize          = fs.Uint("fk-winsize", sec.FKWinSize, "")
 		synfake            = fs.Bool("synfake", sec.SynFake, "")
 		synfakeLen         = fs.Uint("synfake-len", sec.SynFakeLen, "")
-		sniDetection       = fs.String("sni-detection", "parse", "")
+		sniDetection       = fs.String("sni-detection", "", "")
 		seg2delay          = fs.Uint("seg2delay", sec.Seg2Delay, "")
 		sniDomains         = fs.String("sni-domains", "", "")
 		excludeDomains     = fs.String("exclude-domains", "", "")
@@ -66,8 +66,8 @@ func Parse(cfg *config.Config, args []string) ([]*config.Section, error) {
 		udpFakeSeqLen      = fs.Uint("udp-fake-seq-len", sec.UDPFakeSeqLen, "")
 		udpFakeLen         = fs.Uint("udp-fake-len", sec.UDPFakeLen, "")
 		udpDportFilter     = fs.String("udp-dport-filter", "", "")
-		udpFakingStrategy  = fs.String("udp-faking-strategy", "none", "")
-		udpFilterQUIC      = fs.String("udp-filter-quic", "disabled", "")
+		udpFakingStrategy  = fs.String("udp-faking-strategy", "", "")
+		udpFilterQUIC      = fs.String("udp-filter-quic", "", "")
 		quicDrop           = fs.Bool("quic-drop", false, "")
 		noDPortFilter      = fs.Bool("no-dport-filter", !sec.DPortFilter, "")
 		sniDomainsFile     = fs.String("sni-domains-file", "", "Path to file with SNI domains to include (one per line).")
@@ -82,18 +82,113 @@ func Parse(cfg *config.Config, args []string) ([]*config.Section, error) {
 	if err := fs.Parse(args); err != nil {
 		return nil, err
 	}
+	lookup := func(name string) *pflag.Flag { return fs.Lookup(name) }
+	changed := func(name string) bool {
+		f := lookup(name)
+		return f != nil && f.Changed
+	}
+	if changed("tls") {
+		sec.TLSEnabled = (*tls == "enabled")
+	}
+	if changed("fake-sni-type") {
+		switch *fakeSNIType {
+		case "default":
+			sec.FakeSNIType = config.FakePayloadDefault
+		case "custom":
+			sec.FakeSNIType = config.FakePayloadCustom
+		case "random":
+			sec.FakeSNIType = config.FakePayloadRandom
+		}
+	}
+
+	// faking-strategy
+	if changed("faking-strategy") {
+		switch *fakingStrategy {
+		case "randseq":
+			sec.FakingStrategy = config.FakeStratRandSeq
+		case "ttl":
+			sec.FakingStrategy = config.FakeStratTTL
+		case "tcp_check":
+			sec.FakingStrategy = config.FakeStratTCPCheck
+		case "pastseq":
+			sec.FakingStrategy = config.FakeStratPastSeq
+		case "md5sum":
+			sec.FakingStrategy = config.FakeStratTCPMD5
+		}
+	}
+
+	// frag
+	if changed("frag") {
+		switch *frag {
+		case "tcp":
+			sec.FragmentationStrategy = config.FragStratTCP
+		case "ip":
+			sec.FragmentationStrategy = config.FragStratIP
+		case "none":
+			sec.FragmentationStrategy = config.FragStratNone
+		}
+	}
+
+	// sni-detection
+	if changed("sni-detection") {
+		switch *sniDetection {
+		case "parse":
+			sec.SNIDetection = 0
+		case "brute":
+			sec.SNIDetection = 1
+		}
+	}
+
+	// udp-mode
+	if changed("udp-mode") {
+		switch *udpMode {
+		case "drop":
+			sec.UDPMode = config.UDPMODEDrop
+		case "fake":
+			sec.UDPMode = config.UDPMODEFake
+		}
+	}
+
+	// udp-faking-strategy
+	if changed("udp-faking-strategy") {
+		switch *udpFakingStrategy {
+		case "checksum":
+			sec.UDPFakingStrategy = config.FakeStratUDPCheck
+		case "ttl":
+			sec.UDPFakingStrategy = config.FakeStratTTL
+		case "none":
+			sec.UDPFakingStrategy = config.FakeStratNone
+		}
+	}
+
+	// udp-filter-quic
+	if changed("udp-filter-quic") {
+		switch *udpFilterQUIC {
+		case "disabled":
+			sec.UDPFilterQuic = config.UDPFilterQuicDisabled
+		case "all":
+			sec.UDPFilterQuic = config.UDPFilterQuicAll
+		case "parse":
+			sec.UDPFilterQuic = config.UDPFilterQuicParsed
+		}
+	}
 
 	// -------- root‑scoped stuff
 	cfg.QueueStartNum = *queueNum
 	cfg.Threads = *threads
 	cfg.Instaflush = *instaflush
 	cfg.UseConntrack = *useConntrack
-	if *silent {
-		cfg.Verbose = config.VerboseInfo
-	}
-	if *trace {
+	switch *logLevel {
+	case "trace":
 		cfg.Verbose = config.VerboseTrace
+	case "debug":
+		cfg.Verbose = config.VerboseDebug
+	case "info":
+		cfg.Verbose = config.VerboseInfo
+	default:
+		cfg.Verbose = config.VerboseInfo // default
 	}
+
 	if *noGSO {
 		cfg.UseGSO = false
 	}
@@ -255,14 +350,16 @@ func applyDomainFiles(sec *config.Section, includePath, excludePath string) erro
 	if includePath != "" {
 		inc, err := readDomainFile(includePath)
 		if err != nil {
-			return fmt.Errorf("read %q: %w", includePath, err)
+			logx.Errorf("read %q: %w", includePath, err)
+			return err
 		}
 		sec.SNIDomains = append(sec.SNIDomains, inc...)
 	}
 	if excludePath != "" {
 		exc, err := readDomainFile(excludePath)
 		if err != nil {
-			return fmt.Errorf("read %q: %w", excludePath, err)
+			logx.Errorf("read %q: %w", excludePath, err)
+			return err
 		}
 		sec.ExcludeSNIDomains = append(sec.ExcludeSNIDomains, exc...)
 	}
@@ -282,8 +379,6 @@ func readDomainFile(path string) ([]string, error) {
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
-
-		// Strip inline comments and then re-trim
 		if i := strings.IndexAny(line, "#;"); i >= 0 {
 			line = line[:i]
 		}
@@ -291,7 +386,15 @@ func readDomainFile(path string) ([]string, error) {
 		if line == "" {
 			continue
 		}
-
+		l := strings.ToLower(line)
+		if strings.HasPrefix(l, "full:") {
+			line = strings.TrimSpace(line[len("full:"):])
+		} else if strings.HasPrefix(l, "domain:") {
+			line = strings.TrimSpace(line[len("domain:"):])
+		}
+		if line == "" {
+			continue
+		}
 		out = append(out, strings.ToLower(line))
 	}
 	if err := sc.Err(); err != nil {
@@ -299,7 +402,6 @@ func readDomainFile(path string) ([]string, error) {
 	}
 	return out, nil
 }
-
 func dedupeLower(in []string) []string {
 	seen := make(map[string]struct{}, len(in))
 	out := in[:0]

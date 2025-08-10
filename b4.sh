@@ -8,6 +8,8 @@ B4_SHARE_DIR="/opt/share/b4"
 
 B4_LATEST_RELEASE_URL="https://github.com/daniellavrushin/b4/releases/latest/download/"
 
+IPV6="${IPV6:-1}"
+
 install() {
     echo "Installing B4..."
     mkdir -p $B4_SHARE_DIR
@@ -109,6 +111,7 @@ firewall_stop_v6() {
     _iptables ip6tables -D B4 -t mangle -p udp -m connbytes --connbytes-dir original --connbytes-mode packets --connbytes 0:8 -j NFQUEUE --queue-num 537 --queue-bypass
     _iptables ip6tables -D POSTROUTING -t mangle -j B4
     _iptables ip6tables -D OUTPUT -m mark --mark 32768/32768 -j ACCEPT
+    ip6tables -t mangle -F B4 >/dev/null 2>&1
     ip6tables -t mangle -X B4 >/dev/null 2>&1
 }
 
@@ -125,12 +128,8 @@ firewall_stop_v4() {
     _iptables iptables -D B4 -t mangle -p udp -m connbytes --connbytes-dir original --connbytes-mode packets --connbytes 0:8 -j NFQUEUE --queue-num 537 --queue-bypass
     _iptables iptables -D POSTROUTING -t mangle -j B4
     _iptables iptables -D OUTPUT -m mark --mark 32768/32768 -j ACCEPT
+    iptables -t mangle -F B4 >/dev/null 2>&1
     iptables -t mangle -X B4 >/dev/null 2>&1
-}
-
-system_config() {
-    sysctl -w net.netfilter.nf_conntrack_checksum=0 >/dev/null 2>&1
-    sysctl -w net.netfilter.nf_conntrack_tcp_be_liberal=1 >/dev/null 2>&1
 }
 
 _iptables() {
@@ -153,6 +152,11 @@ _iptables() {
             $ARG
         fi
     fi
+}
+
+system_config() {
+    sysctl -w net.netfilter.nf_conntrack_checksum=0 >/dev/null 2>&1
+    sysctl -w net.netfilter.nf_conntrack_tcp_be_liberal=1 >/dev/null 2>&1
 }
 
 case "$1" in

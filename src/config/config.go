@@ -149,7 +149,7 @@ var DefaultSection = Section{
 var DefaultConfig = Config{
 	QueueStartNum:  537,
 	Threads:        1,
-	UseGSO:         false,
+	UseGSO:         true,
 	UseIPv6:        true,
 	UseConntrack:   true,
 	Mark:           1 << 15, // 32768

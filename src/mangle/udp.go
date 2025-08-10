@@ -16,6 +16,10 @@ func init() { rand.Seed(time.Now().UnixNano()) }
 func processUDP(udp *layers.UDP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 	payload gopacket.Payload, sec *config.Section, origPacket []byte) Verdict {
 
+	if !fromLAN(ip4, ip6) {
+		return VerdictContinue // skip server-side QUIC for SNI
+	}
+
 	/* 0.  sanity checks ----------------------------------------------- */
 	if v := processUDPQUIC(sec, udp, []byte(payload)); v != VerdictContinue {
 		return v
@@ -138,4 +142,20 @@ func sendFakeUDPSequence(sec *config.Section, udp *layers.UDP,
 		}
 		_ = sendRaw(raw)
 	}
+}
+
+func fromLAN(ip4 *layers.IPv4, ip6 *layers.IPv6) bool {
+	if ip4 != nil {
+		b := ip4.SrcIP
+		// RFC1918
+		if b[0] == 10 || (b[0] == 192 && b[1] == 168) || (b[0] == 172 && (b[1]&0xF0) == 16) {
+			return true
+		}
+		return false
+	}
+	if ip6 != nil {
+		// ULA fc00::/7
+		return (ip6.SrcIP[0] & 0xFE) == 0xFC
+	}
+	return false
 }

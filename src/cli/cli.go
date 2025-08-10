@@ -30,7 +30,7 @@ func Parse(cfg *config.Config, args []string) ([]*config.Section, error) {
 	threads := fs.Int("threads", cfg.Threads, "Number of NFQUEUE workers")
 	logLevel := fs.String("log-level", "info", "Verbosity level: trace, debug, info")
 	instaflush := fs.Bool("instaflush", cfg.Instaflush, "Unbuffered logging")
-	noGSO := fs.Bool("no-gso", false, "Disable GSO handling")
+	noGSO := fs.Bool("no-gso", !cfg.UseGSO, "Disable GSO handling")
 	useConntrack := fs.Bool("use-conntrack", cfg.UseConntrack, "Enable conntrack support")
 	noIPv6 := fs.Bool("no-ipv6", false, "Disable IPv6 raw socket")
 	connbytesLimit := fs.Int("connbytes-limit", cfg.ConnBytesLimit, "Connbytes limit")

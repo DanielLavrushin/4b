@@ -10,6 +10,7 @@ import (
 	"github.com/google/gopacket/layers"
 )
 
+// allow tests to stub, like other parts of this package
 var (
 	quicIsInitial      = quic.IsInitial
 	quicDecryptInitial = quic.DecryptInitial
@@ -33,31 +34,26 @@ func quicParsedMatch(sec *config.Section, udp *layers.UDP, payload []byte) bool 
 	}
 	plain, ok := quicDecryptInitial(dcid, payload)
 	if !ok {
+		// also print version to debug v1 vs v2
 		if len(payload) >= 5 {
 			logx.Tracef("QUIC: decrypt failed, ver=%08x", binary.BigEndian.Uint32(payload[1:5]))
 		}
 		return false
 	}
-	crypto, ok := quicAssembleCrypto(dcid, plain) // ВАЖНО: DCID
+	crypto, ok := quicAssembleCrypto(dcid, plain)
 	if !ok || len(crypto) == 0 {
 		logx.Tracef("QUIC: no CRYPTO frames")
 		return false
 	}
 
 	if sec.SNIDetection == 0 { // parse mode
-		host, err := extractSNIFromQUIC(crypto)
-		if err != nil || len(host) == 0 {
-			if err != nil {
-				logx.Tracef("QUIC: SNI parse error: %v", err)
-			}
-			return false
-		}
-		if !sec.MatchesSNI(string(host)) {
-			logx.Tracef("QUIC SNI (non-match): %s", host)
+		host, err := extractSNIFromQUIC(crypto) // TLS from QUIC CRYPTO (no TLS record layer)
+		if err != nil {
+			logx.Tracef("QUIC: SNI parse error: %v", err)
 			return false
 		}
 		logx.Infof("QUIC SNI: %s", host)
-		return true
+		return sec.MatchesSNI(string(host))
 	}
 
 	if sec.AllDomains != 0 {
@@ -71,6 +67,7 @@ func quicParsedMatch(sec *config.Section, udp *layers.UDP, payload []byte) bool 
 	return ok
 }
 
+// parseDCID: flags(1) + ver(4) + DCID Len + DCID + ...
 func parseDCID(b []byte) []byte {
 	if len(b) < 7 || b[0]&0x80 == 0 {
 		return nil
@@ -88,8 +85,17 @@ func processUDPQUIC(sec *config.Section, udp *layers.UDP, payload []byte) Verdic
 	switch sec.UDPFilterQuic {
 	case config.UDPFilterQuicDisabled:
 		return VerdictContinue
+
 	case config.UDPFilterQuicAll:
-		// unconditional
+		if sec.DPortFilter && udp.DstPort != 443 {
+			return VerdictContinue
+		}
+		if sec.UDPMode == config.UDPMODEDrop {
+			logx.Infof("QUIC: drop (all-mode) dport=%d", uint16(udp.DstPort))
+			return VerdictDrop
+		}
+		return VerdictContinue
+
 	case config.UDPFilterQuicParsed:
 		if !quicParsedMatch(sec, udp, payload) {
 			return VerdictContinue
@@ -99,5 +105,5 @@ func processUDPQUIC(sec *config.Section, udp *layers.UDP, payload []byte) Verdic
 	if sec.UDPMode == config.UDPMODEDrop {
 		return VerdictDrop
 	}
-	return VerdictContinue // UDPMODEFake: пусть дальше обработается
+	return VerdictContinue
 }

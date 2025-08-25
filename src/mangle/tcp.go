@@ -78,6 +78,7 @@ func sendAlteredSyn(tcp *layers.TCP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 	if err := sendRaw(raw); err != nil {
 		return VerdictAccept
 	}
+	tcpStreamDelete(tcp, ip4, ip6)
 	return VerdictDrop
 }
 
@@ -99,16 +100,33 @@ func processTCP(tcp *layers.TCP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 		// no reason to parse TLS at all
 		return VerdictContinue
 	}
-
-	// Реальный TCP payload берём из сырого пакета, как в C (tcp_payload_split)
+	// Реальный TCP payload берём из сырого пакета
 	tcpPayload, ok2 := splitTCP(origPkt)
 	if !ok2 || len(tcpPayload) == 0 {
 		return VerdictContinue
 	}
-	logx.Tracef("TCP payload seen: dport=%d, len=%d", tcp.DstPort, len(tcpPayload))
-	// 0. Find SNI according to detection mode (parse/brute/AllDomains)
-	sni, sniOff, ok := findSNI(sec, tcpPayload)
+	logx.Tracef("processing TCP packet: ip4=%v, ip6=%v, payload lenght=%d", ip4 != nil, ip6 != nil, len(tcpPayload))
+
+	// 0. Сначала аккумулируем непрерывный префикс потока (ClientHello может быть в нескольких сегментах)
+	prefix, baseSeq, okAsm := tcpAssemblePrefix(tcp, ip4, ip6, tcpPayload)
+	if !okAsm || len(prefix) == 0 {
+		return VerdictContinue
+	}
+
+	// Ищем SNI в собранном префиксе
+	sni, sniOff, ok := findSNI(sec, prefix) // parse/brute/AllDomains — как настроено
 	if !ok {
+		return VerdictContinue
+	}
+
+	// Смещение начала текущего пакета в потоке (от baseSeq)
+	pktStart := int(tcp.Seq - baseSeq)
+	pktEnd := pktStart + len(tcpPayload)
+
+	// Если SNI не попадает в ТЕКУЩИЙ пакет — ждём тот, где попадёт
+	if sniOff < pktStart || sniOff >= pktEnd {
+		// можно подсветить, что SNI уже известен, но пока не в этом сегменте
+		logx.Tracef("TCP SNI known=%s, but not in this packet (sni@%d, pkt[%d..%d))", sni, sniOff, pktStart, pktEnd)
 		return VerdictContinue
 	}
 
@@ -132,7 +150,10 @@ func processTCP(tcp *layers.TCP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 
 	// 1a. Build candidate first-part lengths (relative to TCP payload start)
 	// base at start of SNI
-	base := sniOff
+	base := sniOff - pktStart
+	if base < 0 || base > len(tcpPayload) {
+		return VerdictContinue
+	}
 	candidates := make([]int, 0, 2)
 	if sec.FragSNIPos > 0 && sec.FragSNIPos < len(sni) {
 		candidates = append(candidates, base+sec.FragSNIPos)
@@ -189,6 +210,7 @@ func processTCP(tcp *layers.TCP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 				dvs = 0
 			}
 			sendFrags(sec, frag1, frag2, dvs, tcp, ip4, ip6)
+			tcpStreamDelete(tcp, ip4, ip6)
 			return VerdictDrop
 		}
 		return VerdictAccept
@@ -205,6 +227,7 @@ func processTCP(tcp *layers.TCP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 			}
 			dvs := firstLen
 			sendFrags(sec, frag1, frag2, dvs, tcp, ip4, ip6)
+			tcpStreamDelete(tcp, ip4, ip6)
 			return VerdictDrop
 		}
 		return VerdictAccept
@@ -305,8 +328,8 @@ func processTCP(tcp *layers.TCP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 
 	for _, firstLen := range candidates {
 		if tryNonFrag(firstLen) {
+			tcpStreamDelete(tcp, ip4, ip6)
 			return VerdictDrop
-
 		}
 	}
 	return VerdictAccept

@@ -66,25 +66,20 @@ func portAllowed(sec *config.Section, p layers.UDPPort) bool {
 }
 
 func udpFiltered(sec *config.Section, udp *layers.UDP, payload []byte) bool {
-
-	// QUIC filter first (unless dport filter is on and port != 443)
 	if sec.UDPFilterQuic != config.UDPFilterQuicDisabled {
 		if !(sec.DPortFilter && uint16(udp.DstPort) != 443) {
-			// Must be Initial. "All": accept Initials; "Parsed": decrypt and match SNI.
-			if sec.UDPFilterQuic == config.UDPFilterQuicAll {
-				return quicIsInitial(payload)
-			}
-			if sec.UDPFilterQuic == config.UDPFilterQuicParsed {
+			switch sec.UDPFilterQuic {
+			case config.UDPFilterQuicAll:
+				return true
+			case config.UDPFilterQuicParsed:
 				return quicParsedMatch(sec, udp, payload)
 			}
 		}
 	}
 
-	// Fall back to numeric dport ranges
 	return portAllowed(sec, udp.DstPort)
 }
 
-// build one forged UDP packet according to flags
 func buildFakeUDP(tpl *layers.UDP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 	fakePayload []byte, sec *config.Section) ([]byte, error) {
 

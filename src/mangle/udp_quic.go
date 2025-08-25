@@ -10,7 +10,6 @@ import (
 	"github.com/google/gopacket/layers"
 )
 
-// allow tests to stub, like other parts of this package
 var (
 	quicIsInitial      = quic.IsInitial
 	quicDecryptInitial = quic.DecryptInitial
@@ -34,30 +33,35 @@ func quicParsedMatch(sec *config.Section, udp *layers.UDP, payload []byte) bool 
 	}
 	plain, ok := quicDecryptInitial(dcid, payload)
 	if !ok {
-		// also print version to debug v1 vs v2
 		if len(payload) >= 5 {
 			logx.Tracef("QUIC: decrypt failed, ver=%08x", binary.BigEndian.Uint32(payload[1:5]))
 		}
 		return false
 	}
-	crypto, ok := quicAssembleCrypto(plain)
+	crypto, ok := quicAssembleCrypto(dcid, plain) // ВАЖНО: DCID
 	if !ok || len(crypto) == 0 {
 		logx.Tracef("QUIC: no CRYPTO frames")
 		return false
 	}
 
 	if sec.SNIDetection == 0 { // parse mode
-		host, err := extractSNIFromQUIC(crypto) // TLS from QUIC CRYPTO (no TLS record layer)
-		if err != nil {
-			logx.Tracef("QUIC: SNI parse error: %v", err)
+		host, err := extractSNIFromQUIC(crypto)
+		if err != nil || len(host) == 0 {
+			if err != nil {
+				logx.Tracef("QUIC: SNI parse error: %v", err)
+			}
 			return false
 		}
-		logx.Infof("QUIC SNI: %s", host) // <— SEE IT HERE
-		return sec.MatchesSNI(string(host))
+		if !sec.MatchesSNI(string(host)) {
+			logx.Tracef("QUIC SNI (non-match): %s", host)
+			return false
+		}
+		logx.Infof("QUIC SNI: %s", host)
+		return true
 	}
 
 	if sec.AllDomains != 0 {
-		logx.Infof("QUIC SNI: <any> (AllDomains)") // optional
+		logx.Infof("QUIC SNI: <any> (AllDomains)")
 		return true
 	}
 	_, _, ok = findSNI(sec, crypto)
@@ -67,7 +71,6 @@ func quicParsedMatch(sec *config.Section, udp *layers.UDP, payload []byte) bool 
 	return ok
 }
 
-// parseDCID: flags(1) + ver(4) + DCID Len + DCID + ...
 func parseDCID(b []byte) []byte {
 	if len(b) < 7 || b[0]&0x80 == 0 {
 		return nil
@@ -81,14 +84,12 @@ func parseDCID(b []byte) []byte {
 	return b[off : off+dlen]
 }
 
-// processUDPQUIC turns the QUIC gating decision into a Verdict.
-// Call this from your UDP handler with the parsed UDP header and the UDP payload.
 func processUDPQUIC(sec *config.Section, udp *layers.UDP, payload []byte) Verdict {
 	switch sec.UDPFilterQuic {
 	case config.UDPFilterQuicDisabled:
 		return VerdictContinue
 	case config.UDPFilterQuicAll:
-		// proceed unconditionally
+		// unconditional
 	case config.UDPFilterQuicParsed:
 		if !quicParsedMatch(sec, udp, payload) {
 			return VerdictContinue
@@ -98,7 +99,5 @@ func processUDPQUIC(sec *config.Section, udp *layers.UDP, payload []byte) Verdic
 	if sec.UDPMode == config.UDPMODEDrop {
 		return VerdictDrop
 	}
-
-	// UDPMODEFake: allow main UDP path to run fake burst + forward original
-	return VerdictContinue
+	return VerdictContinue // UDPMODEFake: пусть дальше обработается
 }

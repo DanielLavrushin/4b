@@ -100,14 +100,20 @@ func processTCP(tcp *layers.TCP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 		return VerdictContinue
 	}
 
-	logx.Tracef("processing TCP packet: ip4=%v, ip6=%v, payload lenght=%d", ip4 != nil, ip6 != nil, len(payload))
-	// 0. Find SNI according to detection mode
-	sni, sniOff, ok := findSNI(sec, []byte(payload))
+	// Реальный TCP payload берём из сырого пакета, как в C (tcp_payload_split)
+	tcpPayload, ok2 := splitTCP(origPkt)
+	if !ok2 || len(tcpPayload) == 0 {
+		return VerdictContinue
+	}
+	logx.Tracef("TCP payload seen: dport=%d, len=%d", tcp.DstPort, len(tcpPayload))
+	// 0. Find SNI according to detection mode (parse/brute/AllDomains)
+	sni, sniOff, ok := findSNI(sec, tcpPayload)
 	if !ok {
 		return VerdictContinue
 	}
 
-	logx.Infof("found SNI: %v", sni)
+	logx.Infof("TCP SNI: %s (sec=%d)", sni, sec.ID)
+
 	// 1. Calculate offsets -------------------------------------------------
 
 	if !sec.MatchesSNI(string(sni)) {
@@ -206,7 +212,7 @@ func processTCP(tcp *layers.TCP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 	default: // FragStratNone – fall back to existing pkt1/pkt2 logic
 	}
 
-	app := []byte(payload)
+	app := tcpPayload
 
 	// helper to actually build and send for a chosen firstLen
 	tryNonFrag := func(firstLen int) bool {

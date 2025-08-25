@@ -3,38 +3,25 @@ package nfq
 import (
 	"github.com/daniellavrushin/b4/config"
 	"github.com/daniellavrushin/b4/mangle"
+	"github.com/daniellavrushin/b4/processor"
 	"github.com/florianl/go-nfqueue"
 )
 
 const packetMark uint32 = 32768 // 0x8000
 
-func Callback(q *nfqueue.Nfqueue, sec *config.Section) func(*nfqueue.Attribute) int {
+func MakeCallback(sec *config.Section) processor.Callback {
 	return func(a *nfqueue.Attribute) int {
-		var raw []byte
-		if a.Payload != nil {
-			raw = *a.Payload
+		if a == nil || a.Payload == nil {
+			return int(nfqueue.NfAccept)
 		}
-		var id uint32
-		if a.PacketID != nil {
-			id = *a.PacketID
-		} else {
-			_ = q.SetVerdict(id, nfqueue.NfAccept)
-			return 0
-		}
+		raw := *a.Payload
 
-		v := handlePacket(sec, raw)
-
+		v := HandlePacket(sec, raw)
 		switch v {
 		case mangle.VerdictDrop:
-			_ = q.SetVerdict(id, nfqueue.NfDrop)
-			return 0
-
-		case mangle.VerdictAccept, mangle.VerdictContinue:
-			_ = q.SetVerdictWithMark(id, nfqueue.NfAccept, int(packetMark))
-			return 0
+			return int(nfqueue.NfDrop)
+		default:
+			return int(nfqueue.NfAccept)
 		}
-
-		_ = q.SetVerdictWithMark(id, nfqueue.NfAccept, int(packetMark))
-		return 0
 	}
 }

@@ -12,7 +12,7 @@ import (
 	"github.com/daniellavrushin/b4/config"
 	"github.com/daniellavrushin/b4/logx"
 	"github.com/daniellavrushin/b4/mangle"
-	"github.com/daniellavrushin/b4/processor"
+	"github.com/daniellavrushin/b4/nfq"
 	"github.com/daniellavrushin/b4/queue"
 	"github.com/daniellavrushin/b4/rawsock"
 )
@@ -66,7 +66,7 @@ func main() {
 	})
 
 	// 3) NFQUEUE workers
-	cb := processor.New(&cfg)
+	cb := nfq.MakeCallback(cfg.FirstSection)
 	workers := make([]*queue.Worker, cfg.Threads)
 	for i := 0; i < cfg.Threads; i++ {
 		id := uint16(uint(cfg.QueueStartNum) + uint(i))

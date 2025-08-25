@@ -8,14 +8,13 @@ import (
 	"github.com/google/gopacket/layers"
 )
 
-// handlePacket — 1-в-1 диспетчер: L3→L4, затем вызываем TCP/UDP-обработчики.
-func handlePacket(sec *config.Section, raw []byte) mangle.Verdict {
+// HandlePacket: L3→L4, затем вызываем TCP/UDP обработчики из mangle.
+func HandlePacket(sec *config.Section, raw []byte) mangle.Verdict {
 	if len(raw) < 1 {
 		return mangle.VerdictAccept
 	}
-	ver := raw[0] >> 4
-
-	if ver == 4 {
+	switch raw[0] >> 4 {
+	case 4:
 		p := gopacket.NewPacket(raw, layers.LayerTypeIPv4, gopacket.NoCopy)
 		if el := p.ErrorLayer(); el != nil {
 			logx.Tracef("decode v4 err: %v", el.Error())
@@ -26,7 +25,6 @@ func handlePacket(sec *config.Section, raw []byte) mangle.Verdict {
 			return mangle.VerdictAccept
 		}
 		ip4 := ip4L.(*layers.IPv4)
-
 		switch ip4.Protocol {
 		case layers.IPProtocolTCP:
 			tl := p.Layer(layers.LayerTypeTCP)
@@ -34,9 +32,7 @@ func handlePacket(sec *config.Section, raw []byte) mangle.Verdict {
 				return mangle.VerdictAccept
 			}
 			tcp := tl.(*layers.TCP)
-			// ApplicationLayer часто пуст (offload) — payload вычислим из raw внутри processTCP.
 			return mangle.ProcessTCP(tcp, ip4, nil, nil, sec, raw)
-
 		case layers.IPProtocolUDP:
 			ul := p.Layer(layers.LayerTypeUDP)
 			if ul == nil {
@@ -48,12 +44,11 @@ func handlePacket(sec *config.Section, raw []byte) mangle.Verdict {
 				app = gopacket.Payload(al.Payload())
 			}
 			return mangle.ProcessUDP(udp, ip4, nil, app, sec, raw)
+		default:
+			return mangle.VerdictAccept
 		}
 
-		return mangle.VerdictAccept
-	}
-
-	if ver == 6 {
+	case 6:
 		p := gopacket.NewPacket(raw, layers.LayerTypeIPv6, gopacket.NoCopy)
 		if el := p.ErrorLayer(); el != nil {
 			logx.Tracef("decode v6 err: %v", el.Error())
@@ -64,7 +59,6 @@ func handlePacket(sec *config.Section, raw []byte) mangle.Verdict {
 			return mangle.VerdictAccept
 		}
 		ip6 := ip6L.(*layers.IPv6)
-
 		switch ip6.NextHeader {
 		case layers.IPProtocolTCP:
 			tl := p.Layer(layers.LayerTypeTCP)
@@ -73,7 +67,6 @@ func handlePacket(sec *config.Section, raw []byte) mangle.Verdict {
 			}
 			tcp := tl.(*layers.TCP)
 			return mangle.ProcessTCP(tcp, nil, ip6, nil, sec, raw)
-
 		case layers.IPProtocolUDP:
 			ul := p.Layer(layers.LayerTypeUDP)
 			if ul == nil {
@@ -85,10 +78,10 @@ func handlePacket(sec *config.Section, raw []byte) mangle.Verdict {
 				app = gopacket.Payload(al.Payload())
 			}
 			return mangle.ProcessUDP(udp, nil, ip6, app, sec, raw)
+		default:
+			return mangle.VerdictAccept
 		}
-
+	default:
 		return mangle.VerdictAccept
 	}
-
-	return mangle.VerdictAccept
 }

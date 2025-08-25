@@ -78,6 +78,7 @@ func sendAlteredSyn(tcp *layers.TCP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 	if err := sendRaw(raw); err != nil {
 		return VerdictAccept
 	}
+	flowMarkDone(ip4, ip6, tcp)
 	tcpStreamDelete(tcp, ip4, ip6)
 	return VerdictDrop
 }
@@ -212,7 +213,7 @@ func processTCP(tcp *layers.TCP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 	// Ищем SNI в собранном префиксе
 	sni, sniOff, ok := findSNI(sec, prefix)
 	if !ok {
-		pktStart := int(tcp.Seq - baseSeq)
+		pktStart := seqDelta(tcp.Seq, baseSeq)
 		pktEnd := pktStart + len(tcpPayload)
 
 		if helloStart, okH := findTLSClientHelloStart(prefix); okH {
@@ -229,27 +230,27 @@ func processTCP(tcp *layers.TCP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 				}
 				logx.Infof("TCP: blind CH split at +%d (sec=%d)", cut, sec.ID)
 				if tryNonFrag(cut) {
+					flowMarkDone(ip4, ip6, tcp)
 					tcpStreamDelete(tcp, ip4, ip6)
 					return VerdictDrop
 				}
 			}
 		}
 
-		if pktStart == 0 {
+		if pktStart == 0 && len(tcpPayload) > 1 && !flowIsDone(ip4, ip6, tcp) {
 			cut := 1
-			if len(tcpPayload) > 1 {
-				logx.Infof("TCP: blind FIRST split at +1 (sec=%d)", sec.ID)
-				if tryNonFrag(cut) {
-					tcpStreamDelete(tcp, ip4, ip6)
-					return VerdictDrop
-				}
+			logx.Infof("TCP: blind FIRST split at +1 (sec=%d)", sec.ID)
+			if tryNonFrag(cut) {
+				flowMarkDone(ip4, ip6, tcp)
+				tcpStreamDelete(tcp, ip4, ip6)
+				return VerdictDrop
 			}
 		}
 
 		return VerdictContinue
 	}
 	// Смещение начала текущего пакета в потоке (от baseSeq)
-	pktStart := int(tcp.Seq - baseSeq)
+	pktStart := seqDelta(tcp.Seq, baseSeq)
 	pktEnd := pktStart + len(tcpPayload)
 
 	// Если SNI не попадает в ТЕКУЩИЙ пакет — ждём тот, где попадёт
@@ -339,6 +340,7 @@ func processTCP(tcp *layers.TCP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 				dvs = 0
 			}
 			sendFrags(sec, frag1, frag2, dvs, tcp, ip4, ip6)
+			flowMarkDone(ip4, ip6, tcp)
 			tcpStreamDelete(tcp, ip4, ip6)
 			return VerdictDrop
 		}
@@ -356,6 +358,7 @@ func processTCP(tcp *layers.TCP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 			}
 			dvs := firstLen
 			sendFrags(sec, frag1, frag2, dvs, tcp, ip4, ip6)
+			flowMarkDone(ip4, ip6, tcp)
 			tcpStreamDelete(tcp, ip4, ip6)
 			return VerdictDrop
 		}
@@ -366,6 +369,7 @@ func processTCP(tcp *layers.TCP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 
 	for _, firstLen := range candidates {
 		if tryNonFrag(firstLen) {
+			flowMarkDone(ip4, ip6, tcp)
 			tcpStreamDelete(tcp, ip4, ip6)
 			return VerdictDrop
 		}
@@ -587,4 +591,8 @@ func onesAdd16(sum, v uint16) uint16 {
 	s := uint32(sum) + uint32(v)
 	s = (s & 0xFFFF) + (s >> 16)
 	return uint16(s)
+}
+
+func seqDelta(a, b uint32) int {
+	return int(int32(a - b))
 }

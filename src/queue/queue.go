@@ -10,7 +10,7 @@ import (
 
 	nfqueue "github.com/florianl/go-nfqueue"
 	"github.com/mdlayher/netlink"
-	"golang.org/x/sys/unix" // <-- add
+	"golang.org/x/sys/unix"
 
 	"github.com/daniellavrushin/b4/logx"
 	"github.com/daniellavrushin/b4/processor"
@@ -19,6 +19,7 @@ import (
 type nfqIface interface {
 	RegisterWithErrorFunc(ctx context.Context, fn nfqueue.HookFunc, errFn nfqueue.ErrorFunc) error
 	SetVerdict(id uint32, verdict int) error
+	SetVerdictWithMark(id uint32, verdict int, mark int) error
 	Close() error
 }
 
@@ -114,13 +115,23 @@ func NewWorker(conf Config, cb processor.Callback) (*Worker, error) {
 			}
 			return nil, fmt.Errorf("nfqueue(%d, af=%d): %w", conf.ID, af, err)
 		}
-		// hook must capture this specific q
+		// hook must capture this specific q (SetVerdict* живут на *Nfqueue)
 		hook := func(a nfqueue.Attribute) int {
-			v := cb(&a) // already nfqueue verdict (int)
-			if a.PacketID != nil {
-				if err := q.SetVerdict(*a.PacketID, v); err != nil {
-					logx.Errorf("nfqueue(%d) SetVerdict id=%d: %v", conf.ID, *a.PacketID, err)
+			v := cb(&a) // твой processor.Callback возвращает nfqueue verdict (int)
+			if a.PacketID == nil {
+				return 0
+			}
+			id := *a.PacketID
+			if v == int(nfqueue.NfDrop) {
+				if err := q.SetVerdict(id, int(nfqueue.NfDrop)); err != nil {
+					logx.Errorf("nfqueue(%d) SetVerdict drop id=%d: %v", conf.ID, id, err)
 				}
+				return 0
+			}
+			// ACCEPT всегда с mark=0x8000 (32768) — 1-в-1 с C
+			const mark = 32768
+			if err := q.SetVerdictWithMark(id, int(nfqueue.NfAccept), mark); err != nil {
+				logx.Errorf("nfqueue(%d) SetVerdictWithMark id=%d: %v", conf.ID, id, err)
 			}
 			return 0
 		}

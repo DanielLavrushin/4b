@@ -82,6 +82,11 @@ func sendAlteredSyn(tcp *layers.TCP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 	return VerdictDrop
 }
 
+func ProcessTCP(tcp *layers.TCP, ip4 *layers.IPv4, ip6 *layers.IPv6,
+	payload gopacket.Payload, sec *config.Section, origPkt []byte) Verdict {
+	return processTCP(tcp, ip4, ip6, payload, sec, origPkt)
+}
+
 // processTCP decides what to do with a single TCP packet.
 func processTCP(tcp *layers.TCP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 	payload gopacket.Payload, sec *config.Section, origPkt []byte) Verdict {
@@ -107,6 +112,97 @@ func processTCP(tcp *layers.TCP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 	}
 	logx.Tracef("processing TCP packet: ip4=%v, ip6=%v, payload lenght=%d", ip4 != nil, ip6 != nil, len(tcpPayload))
 
+	app := tcpPayload
+
+	// helper to actually build and send for a chosen firstLen
+	tryNonFrag := func(firstLen int) bool {
+		if firstLen < 0 || firstLen > len(app) {
+			return false
+		}
+		first := app[:firstLen]
+		second := app[firstLen:]
+
+		// 4.2  helper: serialise a full packet with *data* as payload and
+		//      *seq* as sequence number.  Returns the raw wire bytes.
+		build := func(data []byte, seq uint32) ([]byte, error) {
+			var (
+				ipv4 layers.IPv4
+				ipv6 layers.IPv6
+				tcph layers.TCP = *tcp
+			)
+			tcph.Seq = seq
+			tcph.ACK = false
+			tcph.SYN = false
+			if sec.FKWinSize > 0 {
+				tcph.Window = uint16(sec.FKWinSize)
+			}
+
+			var ipLayer gopacket.SerializableLayer
+			if ip4 != nil {
+				ipv4 = *ip4
+				ipv4.Length, ipv4.Checksum = 0, 0
+				ipLayer = &ipv4
+				_ = tcph.SetNetworkLayerForChecksum(&ipv4)
+			} else {
+				ipv6 = *ip6
+				ipv6.Length = 0
+				ipLayer = &ipv6
+				_ = tcph.SetNetworkLayerForChecksum(&ipv6)
+			}
+
+			buf := gopacket.NewSerializeBuffer()
+			opts := gopacket.SerializeOptions{
+				FixLengths:       true,
+				ComputeChecksums: true,
+			}
+			if err := gopacket.SerializeLayers(
+				buf, opts, ipLayer, &tcph, gopacket.Payload(data),
+			); err != nil {
+				return nil, err
+			}
+			return buf.Bytes(), nil
+		}
+
+		// 4.3  craft the two real segments
+		baseSeq := tcp.Seq
+		pkt1, err1 := build(first, baseSeq)
+		pkt2, err2 := build(second, baseSeq+uint32(len(first)))
+
+		if err1 != nil || err2 != nil {
+			logx.Errorf("fragment build: %v %v", err1, err2)
+			return false
+		}
+
+		// 4.4  send real pieces with the fake burst *between* them
+		firstReal, secondReal := pkt1, pkt2
+		if sec.FragSNIReverse {
+			firstReal, secondReal = pkt2, pkt1
+		}
+		_ = sendRaw(firstReal)
+		{
+			if sec.FakeSNI {
+				fakePayload := chooseFakePayload(sec, sec.FakeSNIPkt, 0)
+				if fake, err := build(fakePayload, baseSeq); err == nil {
+					_ = sendRaw(fake)
+				}
+			}
+			ft := fakeTypeFromSection(sec)
+			dvsLocal := len(first) // equals chosen firstLen
+			if sec.FragSNIFaked || sec.FragTwoStage {
+				ft.RandSeqOff = dvsLocal
+			}
+			sendFakeSeq(sec, ft, tcp, ip4, ip6)
+		}
+
+		dvsLocal := len(first)
+		if sec.Seg2Delay > 0 && ((dvsLocal > 0) != sec.FragSNIReverse) {
+			_ = sendDelayed(secondReal, sec.Seg2Delay)
+		} else {
+			_ = sendRaw(secondReal)
+		}
+		return true
+	}
+
 	// 0. Сначала аккумулируем непрерывный префикс потока (ClientHello может быть в нескольких сегментах)
 	prefix, baseSeq, okAsm := tcpAssemblePrefix(tcp, ip4, ip6, tcpPayload)
 	if !okAsm || len(prefix) == 0 {
@@ -114,11 +210,44 @@ func processTCP(tcp *layers.TCP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 	}
 
 	// Ищем SNI в собранном префиксе
-	sni, sniOff, ok := findSNI(sec, prefix) // parse/brute/AllDomains — как настроено
+	sni, sniOff, ok := findSNI(sec, prefix)
 	if !ok {
+		pktStart := int(tcp.Seq - baseSeq)
+		pktEnd := pktStart + len(tcpPayload)
+
+		if helloStart, okH := findTLSClientHelloStart(prefix); okH {
+			if helloStart >= pktStart && helloStart < pktEnd {
+				cut := (helloStart - pktStart) + 1
+				if cut < 1 {
+					cut = 1
+				}
+				if cut >= len(tcpPayload) {
+					cut = len(tcpPayload) / 2
+					if cut < 1 {
+						cut = 1
+					}
+				}
+				logx.Infof("TCP: blind CH split at +%d (sec=%d)", cut, sec.ID)
+				if tryNonFrag(cut) {
+					tcpStreamDelete(tcp, ip4, ip6)
+					return VerdictDrop
+				}
+			}
+		}
+
+		if pktStart == 0 {
+			cut := 1
+			if len(tcpPayload) > 1 {
+				logx.Infof("TCP: blind FIRST split at +1 (sec=%d)", sec.ID)
+				if tryNonFrag(cut) {
+					tcpStreamDelete(tcp, ip4, ip6)
+					return VerdictDrop
+				}
+			}
+		}
+
 		return VerdictContinue
 	}
-
 	// Смещение начала текущего пакета в потоке (от baseSeq)
 	pktStart := int(tcp.Seq - baseSeq)
 	pktEnd := pktStart + len(tcpPayload)
@@ -235,97 +364,6 @@ func processTCP(tcp *layers.TCP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 	default: // FragStratNone – fall back to existing pkt1/pkt2 logic
 	}
 
-	app := tcpPayload
-
-	// helper to actually build and send for a chosen firstLen
-	tryNonFrag := func(firstLen int) bool {
-		if firstLen < 0 || firstLen > len(app) {
-			return false
-		}
-		first := app[:firstLen]
-		second := app[firstLen:]
-
-		// 4.2  helper: serialise a full packet with *data* as payload and
-		//      *seq* as sequence number.  Returns the raw wire bytes.
-		build := func(data []byte, seq uint32) ([]byte, error) {
-			var (
-				ipv4 layers.IPv4
-				ipv6 layers.IPv6
-				tcph layers.TCP = *tcp
-			)
-			tcph.Seq = seq
-			tcph.ACK = false
-			tcph.SYN = false
-			if sec.FKWinSize > 0 {
-				tcph.Window = uint16(sec.FKWinSize)
-			}
-
-			var ipLayer gopacket.SerializableLayer
-			if ip4 != nil {
-				ipv4 = *ip4
-				ipv4.Length, ipv4.Checksum = 0, 0
-				ipLayer = &ipv4
-				_ = tcph.SetNetworkLayerForChecksum(&ipv4)
-			} else {
-				ipv6 = *ip6
-				ipv6.Length = 0
-				ipLayer = &ipv6
-				_ = tcph.SetNetworkLayerForChecksum(&ipv6)
-			}
-
-			buf := gopacket.NewSerializeBuffer()
-			opts := gopacket.SerializeOptions{
-				FixLengths:       true,
-				ComputeChecksums: true,
-			}
-			if err := gopacket.SerializeLayers(
-				buf, opts, ipLayer, &tcph, gopacket.Payload(data),
-			); err != nil {
-				return nil, err
-			}
-			return buf.Bytes(), nil
-		}
-
-		// 4.3  craft the two real segments
-		baseSeq := tcp.Seq
-		pkt1, err1 := build(first, baseSeq)
-		pkt2, err2 := build(second, baseSeq+uint32(len(first)))
-
-		if err1 != nil || err2 != nil {
-			logx.Errorf("fragment build: %v %v", err1, err2)
-			return false
-		}
-
-		// 4.4  send real pieces with the fake burst *between* them
-		firstReal, secondReal := pkt1, pkt2
-		if sec.FragSNIReverse {
-			firstReal, secondReal = pkt2, pkt1
-		}
-		_ = sendRaw(firstReal)
-		{
-			if sec.FakeSNI {
-				fakePayload := chooseFakePayload(sec, sec.FakeSNIPkt, 0)
-				if fake, err := build(fakePayload, baseSeq); err == nil {
-					_ = sendRaw(fake)
-				}
-			}
-			ft := fakeTypeFromSection(sec)
-			dvsLocal := len(first) // equals chosen firstLen
-			if sec.FragSNIFaked || sec.FragTwoStage {
-				ft.RandSeqOff = dvsLocal
-			}
-			sendFakeSeq(sec, ft, tcp, ip4, ip6)
-		}
-
-		dvsLocal := len(first)
-		if sec.Seg2Delay > 0 && ((dvsLocal > 0) != sec.FragSNIReverse) {
-			_ = sendDelayed(secondReal, sec.Seg2Delay)
-		} else {
-			_ = sendRaw(secondReal)
-		}
-		return true
-	}
-
 	for _, firstLen := range candidates {
 		if tryNonFrag(firstLen) {
 			tcpStreamDelete(tcp, ip4, ip6)
@@ -364,8 +402,6 @@ func sendFrags(sec *config.Section, a, b []byte, dvs int, tcp *layers.TCP, ip4 *
 	}
 }
 
-// overrideTCPWindow sets TCP.Window and fixes checksums.
-// Returns (newRaw, true) only when it actually changed the packet.
 func overrideTCPWindow(raw []byte, win uint16) ([]byte, bool) {
 	// ---------- IPv4 first-fragment fast path ----------
 	if len(raw) >= 20 && raw[0]>>4 == 4 {
@@ -509,6 +545,22 @@ func overrideTCPWindow(raw []byte, win uint16) ([]byte, bool) {
 		return out, true
 	}
 	return raw, false
+}
+
+func findTLSClientHelloStart(b []byte) (int, bool) {
+	for i := 0; i+6 < len(b); i++ {
+		if b[i] != 0x16 { // ContentType=Handshake
+			continue
+		}
+		if b[i+1] != 0x03 { // TLS major
+			continue
+		}
+		// b[i+3:i+5] — длина record; можем не проверять строго
+		if b[i+5] == 0x01 { // HandshakeType=ClientHello
+			return i, true
+		}
+	}
+	return 0, false
 }
 
 // --- tiny checksum helpers (used by IPv6 fast path) ---

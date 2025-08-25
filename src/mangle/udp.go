@@ -13,6 +13,11 @@ import (
 
 func init() { rand.Seed(time.Now().UnixNano()) }
 
+func ProcessUDP(udp *layers.UDP, ip4 *layers.IPv4, ip6 *layers.IPv6,
+	payload gopacket.Payload, sec *config.Section, origPkt []byte) Verdict {
+	return processUDP(udp, ip4, ip6, payload, sec, origPkt)
+}
+
 func processUDP(udp *layers.UDP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 	payload gopacket.Payload, sec *config.Section, origPacket []byte) Verdict {
 

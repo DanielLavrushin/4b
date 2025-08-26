@@ -22,7 +22,6 @@ var (
 func sendAlteredSyn(tcp *layers.TCP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 	sec *config.Section) Verdict {
 
-	// 1. Decide payload
 	payload := chooseFakePayload(sec, sec.FakeSNIPkt, int(sec.SynFakeLen))
 
 	logx.Tracef("tcp: SYN alter (sec=%d) payloadLen=%d winOverride=%d ipver=%d",
@@ -33,7 +32,6 @@ func sendAlteredSyn(tcp *layers.TCP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 			return 6
 		}())
 
-	// 2. Make editable header copies
 	var (
 		ipv4 layers.IPv4
 		ipv6 layers.IPv6
@@ -48,8 +46,8 @@ func sendAlteredSyn(tcp *layers.TCP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 	var ipLayer gopacket.SerializableLayer
 	if ip4 != nil {
 		ipv4 = *ip4
-		ipv4.Length = 0   // ask gopacket to fill
-		ipv4.Checksum = 0 // ditto
+		ipv4.Length = 0
+		ipv4.Checksum = 0
 		ipLayer = &ipv4
 		_ = tcph.SetNetworkLayerForChecksum(&ipv4)
 	} else {
@@ -59,11 +57,10 @@ func sendAlteredSyn(tcp *layers.TCP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 		_ = tcph.SetNetworkLayerForChecksum(&ipv6)
 	}
 
-	// 3. Serialize with checksum support
 	buf := gopacket.NewSerializeBuffer()
 	opts := gopacket.SerializeOptions{
 		FixLengths:       true,
-		ComputeChecksums: true, // <-- HERE
+		ComputeChecksums: true,
 	}
 
 	if err := gopacket.SerializeLayers(
@@ -88,11 +85,9 @@ func ProcessTCP(tcp *layers.TCP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 	return processTCP(tcp, ip4, ip6, payload, sec, origPkt)
 }
 
-// processTCP decides what to do with a single TCP packet.
 func processTCP(tcp *layers.TCP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 	payload gopacket.Payload, sec *config.Section, origPkt []byte) Verdict {
 
-	// --- fast filters -------------------------------------------------
 	if sec.DPortFilter && tcp.DstPort != 443 {
 		return VerdictAccept
 	}
@@ -103,10 +98,8 @@ func processTCP(tcp *layers.TCP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 		return VerdictContinue
 	}
 	if !sec.TLSEnabled {
-		// no reason to parse TLS at all
 		return VerdictContinue
 	}
-	// Реальный TCP payload берём из сырого пакета
 	tcpPayload, ok2 := splitTCP(origPkt)
 	if !ok2 || len(tcpPayload) == 0 {
 		return VerdictContinue
@@ -115,7 +108,6 @@ func processTCP(tcp *layers.TCP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 
 	app := tcpPayload
 
-	// helper to actually build and send for a chosen firstLen
 	tryNonFrag := func(firstLen int) bool {
 		if firstLen < 0 || firstLen > len(app) {
 			return false
@@ -123,8 +115,6 @@ func processTCP(tcp *layers.TCP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 		first := app[:firstLen]
 		second := app[firstLen:]
 
-		// 4.2  helper: serialise a full packet with *data* as payload and
-		//      *seq* as sequence number.  Returns the raw wire bytes.
 		build := func(data []byte, seq uint32) ([]byte, error) {
 			var (
 				ipv4 layers.IPv4
@@ -132,11 +122,7 @@ func processTCP(tcp *layers.TCP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 				tcph layers.TCP = *tcp
 			)
 			tcph.Seq = seq
-			tcph.ACK = false
 			tcph.SYN = false
-			if sec.FKWinSize > 0 {
-				tcph.Window = uint16(sec.FKWinSize)
-			}
 
 			var ipLayer gopacket.SerializableLayer
 			if ip4 != nil {
@@ -164,7 +150,6 @@ func processTCP(tcp *layers.TCP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 			return buf.Bytes(), nil
 		}
 
-		// 4.3  craft the two real segments
 		baseSeq := tcp.Seq
 		pkt1, err1 := build(first, baseSeq)
 		pkt2, err2 := build(second, baseSeq+uint32(len(first)))
@@ -174,21 +159,14 @@ func processTCP(tcp *layers.TCP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 			return false
 		}
 
-		// 4.4  send real pieces with the fake burst *between* them
 		firstReal, secondReal := pkt1, pkt2
 		if sec.FragSNIReverse {
 			firstReal, secondReal = pkt2, pkt1
 		}
 		_ = sendRaw(firstReal)
 		{
-			if sec.FakeSNI {
-				fakePayload := chooseFakePayload(sec, sec.FakeSNIPkt, 0)
-				if fake, err := build(fakePayload, baseSeq); err == nil {
-					_ = sendRaw(fake)
-				}
-			}
 			ft := fakeTypeFromSection(sec)
-			dvsLocal := len(first) // equals chosen firstLen
+			dvsLocal := len(first)
 			if sec.FragSNIFaked || sec.FragTwoStage {
 				ft.RandSeqOff = dvsLocal
 			}
@@ -204,13 +182,11 @@ func processTCP(tcp *layers.TCP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 		return true
 	}
 
-	// 0. Сначала аккумулируем непрерывный префикс потока (ClientHello может быть в нескольких сегментах)
 	prefix, baseSeq, okAsm := tcpAssemblePrefix(tcp, ip4, ip6, tcpPayload)
 	if !okAsm || len(prefix) == 0 {
 		return VerdictContinue
 	}
 
-	// Ищем SNI в собранном префиксе
 	sni, sniOff, ok := findSNI(sec, prefix)
 	if !ok {
 		pktStart := seqDelta(tcp.Seq, baseSeq)
@@ -249,24 +225,15 @@ func processTCP(tcp *layers.TCP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 
 		return VerdictContinue
 	}
-	// Смещение начала текущего пакета в потоке (от baseSeq)
 	pktStart := seqDelta(tcp.Seq, baseSeq)
 	pktEnd := pktStart + len(tcpPayload)
 
-	// Если SNI не попадает в ТЕКУЩИЙ пакет — ждём тот, где попадёт
 	if sniOff < pktStart || sniOff >= pktEnd {
-		// можно подсветить, что SNI уже известен, но пока не в этом сегменте
 		logx.Tracef("TCP SNI known=%s, but not in this packet (sni@%d, pkt[%d..%d))", sni, sniOff, pktStart, pktEnd)
 		return VerdictContinue
 	}
 
 	logx.Infof("TCP SNI: %s (sec=%d)", sni, sec.ID)
-
-	// 1. Calculate offsets -------------------------------------------------
-
-	if !sec.MatchesSNI(string(sni)) {
-		return VerdictContinue
-	}
 
 	origPacket := origPkt
 	tcpHdrLen := int(tcp.DataOffset) * 4
@@ -275,11 +242,13 @@ func processTCP(tcp *layers.TCP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 		ipHdrLen = int(ip4.IHL) * 4
 	} else {
 		ipHdrLen = 40
-	} // IPv6 fixed 40
+	}
 	tcpPayloadOffset := ipHdrLen + tcpHdrLen
 
-	// 1a. Build candidate first-part lengths (relative to TCP payload start)
-	// base at start of SNI
+	if !sec.MatchesSNI(string(sni)) {
+		return VerdictContinue
+	}
+
 	base := sniOff - pktStart
 	if base < 0 || base > len(tcpPayload) {
 		return VerdictContinue
@@ -292,9 +261,8 @@ func processTCP(tcp *layers.TCP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 		candidates = append(candidates, base+len(sni)/2)
 	}
 	if len(candidates) == 0 {
-		candidates = append(candidates, base) // default: split at SNI start
+		candidates = append(candidates, base)
 	}
-	// de-dup while preserving order
 	{
 		seen := make(map[int]bool, len(candidates))
 		uniq := candidates[:0]
@@ -307,14 +275,12 @@ func processTCP(tcp *layers.TCP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 		candidates = uniq
 	}
 
-	// 2. Choose fragmentation method ---------------------------------------
 	switch sec.FragmentationStrategy {
 
 	case config.FragStratIP:
 		if ip4 == nil {
 			break
 		}
-		// set TCP window on the whole packet first
 		if sec.FKWinSize > 0 {
 			if pkt, ok := overrideTCPWindow(origPacket, uint16(sec.FKWinSize)); ok {
 				origPacket = pkt
@@ -324,10 +290,8 @@ func processTCP(tcp *layers.TCP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 			if firstLen <= 0 {
 				continue
 			}
-			// absolute split position in whole packet
 			splitAt := tcpPayloadOffset + firstLen
-			cut := splitAt - ipHdrLen // offset within IP payload
-			// IP fragments must start on an 8-byte boundary (from IP payload start)
+			cut := splitAt - ipHdrLen
 			if rem := cut % 8; rem != 0 {
 				cut += 8 - rem
 			}
@@ -335,7 +299,7 @@ func processTCP(tcp *layers.TCP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 			if err != nil {
 				continue
 			}
-			dvs := cut - tcpHdrLen // bytes of TCP payload in the first frag
+			dvs := cut - tcpHdrLen
 			if dvs < 0 {
 				dvs = 0
 			}
@@ -343,6 +307,13 @@ func processTCP(tcp *layers.TCP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 			flowMarkDone(ip4, ip6, tcp)
 			tcpStreamDelete(tcp, ip4, ip6)
 			return VerdictDrop
+		}
+		for _, firstLen := range candidates {
+			if firstLen > 0 && tryNonFrag(firstLen) {
+				flowMarkDone(ip4, ip6, tcp)
+				tcpStreamDelete(tcp, ip4, ip6)
+				return VerdictDrop
+			}
 		}
 		return VerdictAccept
 
@@ -362,9 +333,16 @@ func processTCP(tcp *layers.TCP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 			tcpStreamDelete(tcp, ip4, ip6)
 			return VerdictDrop
 		}
+		for _, firstLen := range candidates {
+			if firstLen > 0 && tryNonFrag(firstLen) {
+				flowMarkDone(ip4, ip6, tcp)
+				tcpStreamDelete(tcp, ip4, ip6)
+				return VerdictDrop
+			}
+		}
 		return VerdictAccept
 
-	default: // FragStratNone – fall back to existing pkt1/pkt2 logic
+	default:
 	}
 
 	for _, firstLen := range candidates {
@@ -392,7 +370,6 @@ func sendFrags(sec *config.Section, a, b []byte, dvs int, tcp *layers.TCP, ip4 *
 	}
 	_ = sendRaw(first)
 	{
-		// fake burst in the middle for frag paths as well
 		ft := fakeTypeFromSection(sec)
 		if sec.FragSNIFaked || sec.FragTwoStage {
 			ft.RandSeqOff = dvs
@@ -407,91 +384,73 @@ func sendFrags(sec *config.Section, a, b []byte, dvs int, tcp *layers.TCP, ip4 *
 }
 
 func overrideTCPWindow(raw []byte, win uint16) ([]byte, bool) {
-	// ---------- IPv4 first-fragment fast path ----------
 	if len(raw) >= 20 && raw[0]>>4 == 4 {
 		ihl := int(raw[0]&0x0F) * 4
-		// L4=TCP?
 		if ihl >= 20 && len(raw) >= ihl+20 && raw[9] == 6 {
-			// flags+fragOffset @ bytes 6..7 (big-endian). low 13 bits = offset.
 			frag := binary.BigEndian.Uint16(raw[6:8])
-			if frag&0x1FFF != 0 { // not the first fragment -> no TCP header here
+			if frag&0x1FFF != 0 {
 				return raw, false
 			}
 			tcpStart := ihl
 			oldWin := binary.BigEndian.Uint16(raw[tcpStart+14 : tcpStart+16])
 			if oldWin == win {
-				return raw, false // already set
+				return raw, false
 			}
 			out := make([]byte, len(raw))
 			copy(out, raw)
-
-			// write new window
 			binary.BigEndian.PutUint16(out[tcpStart+14:tcpStart+16], win)
-
-			// RFC 1624 incremental update of TCP checksum
 			oldCsum := binary.BigEndian.Uint16(out[tcpStart+16 : tcpStart+18])
 			c := ^oldCsum
 			c = onesAdd16(c, ^oldWin)
 			c = onesAdd16(c, win)
 			newCsum := ^c
 			binary.BigEndian.PutUint16(out[tcpStart+16:tcpStart+18], newCsum)
-
-			// IPv4 header checksum unchanged (we didn't touch it).
 			return out, true
 		}
 	}
 
-	// ---------- IPv6 fast path (no extension headers) ----------
-	if len(raw) >= 40 && (raw[0]>>4) == 6 && raw[6] == 6 { // IPv6 + NextHeader=TCP
+	if len(raw) >= 40 && (raw[0]>>4) == 6 && raw[6] == 6 {
 		out := make([]byte, len(raw))
 		copy(out, raw)
 
-		tcpStart := 40 // fixed IPv6 header
+		tcpStart := 40
 		if len(out) < tcpStart+20 {
 			return raw, false
 		}
 
 		oldWin := binary.BigEndian.Uint16(out[tcpStart+14 : tcpStart+16])
 		if oldWin == win {
-			return raw, false // already set
+			return raw, false
 		}
 
-		// Write new window
 		binary.BigEndian.PutUint16(out[tcpStart+14:tcpStart+16], win)
 
-		// Recompute TCP checksum with IPv6 pseudo-header
 		out[tcpStart+16], out[tcpStart+17] = 0, 0
 		tcpLen := len(out) - tcpStart
 
-		// Pseudo header: src(16) dst(16) upper-len(4) zeros(3) next(1)
 		var pseudo [40]byte
-		copy(pseudo[0:16], out[8:24])   // src
-		copy(pseudo[16:32], out[24:40]) // dst
+		copy(pseudo[0:16], out[8:24])
+		copy(pseudo[16:32], out[24:40])
 		pseudo[32] = byte(uint32(tcpLen) >> 24)
 		pseudo[33] = byte(uint32(tcpLen) >> 16)
 		pseudo[34] = byte(uint32(tcpLen) >> 8)
 		pseudo[35] = byte(uint32(tcpLen))
-		// pseudo[36..38] left as zero
-		pseudo[39] = 6 // TCP
+		pseudo[39] = 6
 
 		sum := sum16(pseudo[:]) + sum16(out[tcpStart:])
 		cs := finalize(sum)
 		out[tcpStart+16] = byte(cs >> 8)
 		out[tcpStart+17] = byte(cs)
 
-		// (No IPv6 header checksum)
 		return out, true
 	}
 
-	// ---------- IPv{4,6} / fallback via gopacket ----------
 	try := func(first gopacket.LayerType) ([]byte, bool) {
-		// Parse the packet (IPv4 or IPv6) using the generic decoder.
 		p := gopacket.NewPacket(raw, first, gopacket.Default)
 		if p.ErrorLayer() != nil {
 			return nil, false
 		}
 
-		// Find IP and TCP layers
 		var ipL gopacket.SerializableLayer
 		var ip4 layers.IPv4
 		var ip6 layers.IPv6
@@ -510,15 +469,13 @@ func overrideTCPWindow(raw []byte, win uint16) ([]byte, bool) {
 		if tl == nil {
 			return nil, false
 		}
-		tcph := *(tl.(*layers.TCP)) // editable copy
+		tcph := *(tl.(*layers.TCP))
 
-		// No change needed? bail out (signals "unchanged")
 		if tcph.Window == win {
 			return raw, false
 		}
 		tcph.Window = win
 
-		// Wire up checksums for re-serialize
 		switch v := ipL.(type) {
 		case *layers.IPv4:
 			v.Length, v.Checksum = 0, 0
@@ -528,7 +485,6 @@ func overrideTCPWindow(raw []byte, win uint16) ([]byte, bool) {
 			_ = tcph.SetNetworkLayerForChecksum(v)
 		}
 
-		// Preserve app payload (extensions may be dropped on re-serialize — OK)
 		var app []byte
 		if al := p.ApplicationLayer(); al != nil {
 			app = al.Payload()
@@ -553,21 +509,19 @@ func overrideTCPWindow(raw []byte, win uint16) ([]byte, bool) {
 
 func findTLSClientHelloStart(b []byte) (int, bool) {
 	for i := 0; i+6 < len(b); i++ {
-		if b[i] != 0x16 { // ContentType=Handshake
+		if b[i] != 0x16 {
 			continue
 		}
-		if b[i+1] != 0x03 { // TLS major
+		if b[i+1] != 0x03 {
 			continue
 		}
-		// b[i+3:i+5] — длина record; можем не проверять строго
-		if b[i+5] == 0x01 { // HandshakeType=ClientHello
+		if b[i+5] == 0x01 {
 			return i, true
 		}
 	}
 	return 0, false
 }
 
-// --- tiny checksum helpers (used by IPv6 fast path) ---
 func sum16(b []byte) uint32 {
 	var s uint32
 	for i := 0; i+1 < len(b); i += 2 {
@@ -586,7 +540,6 @@ func finalize(s uint32) uint16 {
 	return ^uint16(s)
 }
 
-// --- 16-bit one's complement add (carry wrap) ---
 func onesAdd16(sum, v uint16) uint16 {
 	s := uint32(sum) + uint32(v)
 	s = (s & 0xFFFF) + (s >> 16)

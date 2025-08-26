@@ -22,34 +22,28 @@ func processUDP(udp *layers.UDP, ip4 *layers.IPv4, ip6 *layers.IPv6,
 	payload gopacket.Payload, sec *config.Section, origPacket []byte) Verdict {
 
 	if !fromLAN(ip4, ip6) {
-		return VerdictContinue // skip server-side QUIC for SNI
+		return VerdictContinue
 	}
 
-	/* 0.  sanity checks ----------------------------------------------- */
 	if v := processUDPQUIC(sec, udp, []byte(payload)); v != VerdictContinue {
 		return v
 	}
 
-	/* 1.  quick filter -------------------------------------------------- */
 	if !udpFiltered(sec, udp, []byte(payload)) {
 		return VerdictContinue
 	}
 
 	logx.Tracef("processing UDP packet: ip4=%v, ip6=%v, payload lenght=%d", ip4 != nil, ip6 != nil, len(payload))
 
-	/* 2.  decide action ------------------------------------------------- */
 	switch sec.UDPMode {
 
 	case config.UDPMODEDrop:
 		return VerdictDrop
 
 	case config.UDPMODEFake:
-		// fire the fake burst
 		sendFakeUDPSequence(sec, udp, ip4, ip6)
-
-		// then forward the *real* packet exactly once
 		_ = sendRaw(origPacket)
-		return VerdictDrop // original must not reach kernel
+		return VerdictDrop
 
 	default:
 		return VerdictContinue

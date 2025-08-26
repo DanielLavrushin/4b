@@ -82,6 +82,11 @@ func parseDCID(b []byte) []byte {
 }
 
 func processUDPQUIC(sec *config.Section, udp *layers.UDP, payload []byte) Verdict {
+
+	if sec.DPortFilter && udp.DstPort != 443 {
+		return VerdictContinue
+	}
+
 	switch sec.UDPFilterQuic {
 	case config.UDPFilterQuicDisabled:
 		return VerdictContinue
@@ -97,13 +102,18 @@ func processUDPQUIC(sec *config.Section, udp *layers.UDP, payload []byte) Verdic
 		return VerdictContinue
 
 	case config.UDPFilterQuicParsed:
-		if !quicParsedMatch(sec, udp, payload) {
+		if quicParsedMatch(sec, udp, payload) {
+			if sec.UDPMode == config.UDPMODEDrop {
+				return VerdictDrop
+			}
 			return VerdictContinue
 		}
+		if sec.UDPMode == config.UDPMODEDrop {
+			logx.Tracef("QUIC: ambiguous or empty, force drop dport=%d", uint16(udp.DstPort))
+			return VerdictDrop
+		}
+		return VerdictContinue
 	}
 
-	if sec.UDPMode == config.UDPMODEDrop {
-		return VerdictDrop
-	}
 	return VerdictContinue
 }

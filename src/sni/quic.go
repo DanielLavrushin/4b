@@ -1,14 +1,44 @@
-// tls/quic_sni.go
-package tls
+package sni
 
 import (
+	"encoding/binary"
+
+	"github.com/daniellavrushin/b4/log"
+	"github.com/daniellavrushin/b4/quic"
 	"golang.org/x/crypto/cryptobyte"
 )
 
-func ExtractSNIFromQUIC(crypto []byte) ([]byte, error) {
+func ParseQUICClientHelloSNI(payload []byte) (string, bool) {
+
+	if !quic.IsInitial(payload) {
+		return "", false
+	}
+
+	dcid := quic.ParseDCID(payload)
+	plain, ok := quic.DecryptInitial(dcid, payload)
+	if !ok {
+		if len(payload) >= 5 {
+			log.Tracef("QUIC: decrypt failed, ver=%08x", binary.BigEndian.Uint32(payload[1:5]))
+		}
+		return "", false
+	}
+	crypto, ok := quic.AssembleCrypto(dcid, plain)
+	if !ok || len(crypto) == 0 {
+		log.Tracef("QUIC: no CRYPTO frames")
+		return "", false
+	}
+
+	host, err := extractSNIFromQUIC(crypto)
+	if err != nil {
+		log.Tracef("QUIC: SNI extraction failed: %v", err)
+		return "", false
+	}
+	return string(host), true
+}
+
+func extractSNIFromQUIC(crypto []byte) ([]byte, error) {
 	s := cryptobyte.String(crypto)
 
-	// В CRYPTO могут идти несколько Handshake-сообщений подряд — сканируем все.
 	for !s.Empty() {
 		var hsType uint8
 		if !s.ReadUint8(&hsType) {

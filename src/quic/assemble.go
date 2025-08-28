@@ -4,12 +4,10 @@ import (
 	"sync"
 )
 
-// --- внутренние типы ---
-
 type cbuf struct {
-	data []byte // накопленный CRYPTO поток
-	mask []byte // 0/1: байт заполнен?
-	head int    // длина непрерывного заполненного префикса [0:head)
+	data []byte
+	mask []byte
+	head int
 }
 
 type cryptoFrame struct {
@@ -21,9 +19,6 @@ var (
 	cmap sync.Map // key = string(DCID), val = *cbuf
 )
 
-// --- вспомогательные функции ---
-
-// QUIC varint: первые 2 бита = длина (1,2,4,8), остальные биты + следующие байты = значение (big-endian).
 func readVarint(b []byte) (val uint64, n int) {
 	if len(b) == 0 {
 		return 0, 0
@@ -40,7 +35,6 @@ func readVarint(b []byte) (val uint64, n int) {
 	return val, l
 }
 
-// вытащить CRYPTO-фреймы из расшифрованного Initial
 func parseCryptoFrames(plain []byte) (out []cryptoFrame) {
 	i := 0
 	for i < len(plain) {
@@ -61,14 +55,12 @@ func parseCryptoFrames(plain []byte) (out []cryptoFrame) {
 			out = append(out, cryptoFrame{off: off, b: plain[i : i+int(ln)]})
 			i += int(ln)
 
-		case 0x00: // PADDING — возможна серия
+		case 0x00: // PADDING
 			for i < len(plain) && plain[i] == 0x00 {
 				i++
 			}
 		case 0x01: // PING
-			// нет полей
 		default:
-			// как в C: встретили чужой тип — завершаем
 			return
 		}
 	}
@@ -99,7 +91,6 @@ func (b *cbuf) write(off int, p []byte) {
 	for i := off; i < end; i++ {
 		b.mask[i] = 1
 	}
-	// обновить head до первого незаполненного
 	for b.head < len(b.mask) && b.mask[b.head] == 1 {
 		b.head++
 	}
@@ -125,7 +116,7 @@ func AssembleCrypto(dcid, plain []byte) ([]byte, bool) {
 	}
 
 	for _, f := range frames {
-		if f.off > 1<<20 { // sanity (1 MiB): защитимся от мусора
+		if f.off > 1<<20 {
 			continue
 		}
 		buf.write(int(f.off), f.b)
@@ -134,6 +125,5 @@ func AssembleCrypto(dcid, plain []byte) ([]byte, bool) {
 	if buf.head == 0 {
 		return nil, false
 	}
-	// Возвращать можно «живой» срез — парсер SNI копирует host.
 	return buf.data[:buf.head], true
 }

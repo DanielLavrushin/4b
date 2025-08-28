@@ -8,7 +8,7 @@ ENABLE_FREEBSD ?= 1
 ENABLE_OPENBSD ?= 1
 ENABLE_ANDROID ?= 0
 
-CGO_ENABLED ?= 0
+CGO_ENABLED ?= 1
 
 LINUX_ARCHS := 386 amd64 armv5 armv6 armv7 arm64 loong64 mips mipsle mips64 mips64le ppc64 ppc64le riscv64 s390x
 FREEBSD_ARCHS := 386 amd64 armv7 arm64

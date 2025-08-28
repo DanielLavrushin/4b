@@ -1,235 +1,150 @@
 package config
 
 import (
-	"encoding/hex"
+	"bufio"
+	"flag"
 	"fmt"
+	"os"
 	"strings"
+
+	"github.com/daniellavrushin/b4/log"
 )
 
 type Logging struct {
-	Verbose    int
+	Level      int
 	Instaflush bool
 	Syslog     bool
 }
 
-const (
-	VerboseInfo = iota
-	VerboseDebug
-	VerboseTrace
-)
-
-const (
-	FragStratTCP = iota
-	FragStratIP
-	FragStratNone
-)
-
-const (
-	FakeStratNone     = 0
-	FakeStratRandSeq  = 1 << 0
-	FakeStratTTL      = 1 << 1
-	FakeStratPastSeq  = 1 << 2
-	FakeStratTCPCheck = 1 << 3
-	FakeStratTCPMD5   = 1 << 4
-	FakeStratUDPCheck = 1 << 5
-)
-
-const (
-	UDPMODEDrop = iota
-	UDPMODEFake
-)
-
-const (
-	UDPFilterQuicDisabled = iota
-	UDPFilterQuicAll
-	UDPFilterQuicParsed
-)
-
-const (
-	FakePayloadDefault = iota // use built-in FakeSNIPkt
-	FakePayloadCustom         // use FakeCustomPkt
-	FakePayloadRandom         // random blob (length-bounded)
-)
-
-type UDPDPortRange struct {
-	Start uint16
-	End   uint16
-}
-
-type Section struct {
-	ID int
-
-	SNIDomains        []string
-	ExcludeSNIDomains []string
-	AllDomains        uint
-
-	TLSEnabled bool
-
-	FragmentationStrategy int
-	FragSNIReverse        bool
-	FragSNIFaked          bool
-	FakingStrategy        int
-	FragMiddleSNI         bool
-	FragSNIPos            int
-	FragTwoStage          bool
-	FakingTTL             uint8
-	FakeSNI               bool
-	FakeSNISeqLen         uint
-
-	FakeSNIType int
-
-	Seg2Delay  uint
-	SynFake    bool
-	SynFakeLen uint
-
-	FakeSNIPkt    []byte
-	FakeCustomPkt []byte
-
-	FKWinSize     uint
-	FakeSeqOffset int
-
-	DPortFilter bool
-
-	SNIDetection int
-
-	UDPMode           int
-	UDPFakeSeqLen     uint
-	UDPFakeLen        uint
-	UDPFakingStrategy int
-
-	UDPDPortRange []UDPDPortRange
-	UDPFilterQuic int
-
-	prev *Section
-	next *Section
-}
-
 type Config struct {
-	QueueStartNum uint
-	Threads       int
-	UseGSO        bool
-	UseIPv6       bool
-	UseConntrack  bool
-	Mark          uint
-	Daemonize     bool
-	NoClose       bool
-	Syslog        bool
-	Instaflush    bool
-
+	QueueStartNum  int
+	Mark           uint
 	ConnBytesLimit int
 
-	Verbose int
-
-	FirstSection *Section
-	LastSection  *Section
-}
-
-var DefaultSection = Section{
-	TLSEnabled:            true,
-	FragSNIReverse:        true,
-	FragmentationStrategy: FragStratTCP,
-	FakingStrategy:        FakeStratPastSeq | FakeStratTCPMD5,
-	FakingTTL:             8,
-	FakeSNI:               true,
-	FakeSNISeqLen:         1,
-	FakeSNIType:           FakePayloadRandom,
-	FragMiddleSNI:         true,
-	FragSNIPos:            1,
-	FragTwoStage:          true,
-	FakeSeqOffset:         10000,
-	DPortFilter:           true,
-	SNIDetection:          0,
-	UDPMode:               UDPMODEFake,
-	UDPFakeSeqLen:         6,
-	UDPFakeLen:            64,
-	UDPFakingStrategy:     FakeStratNone,
-	UDPFilterQuic:         UDPFilterQuicDisabled,
+	Interface    string
+	Logging      Logging
+	SNIDomains   []string
+	Threads      int
+	UseGSO       bool
+	UseConntrack bool
 }
 
 var DefaultConfig = Config{
 	QueueStartNum:  537,
-	Threads:        1,
-	UseGSO:         true,
-	UseIPv6:        true,
-	UseConntrack:   true,
 	Mark:           1 << 15, // 32768
-	Daemonize:      false,
-	NoClose:        false,
-	Syslog:         false,
-	Instaflush:     false,
+	Threads:        4,
 	ConnBytesLimit: 19,
-	Verbose:        VerboseInfo,
+	UseConntrack:   true,
+	UseGSO:         false,
+	Logging: Logging{
+		Level:      int(log.LevelInfo),
+		Instaflush: true,
+		Syslog:     false,
+	},
 }
 
-func NewSection(id int) *Section {
-	s := &Section{
-		ID:                    id,
-		TLSEnabled:            true,
-		FragmentationStrategy: FragStratTCP,
-		FragSNIReverse:        true,
-		FragSNIFaked:          false,
-		FragMiddleSNI:         true,
-		FragSNIPos:            1,
-		FakingStrategy:        FakeStratPastSeq,
-		FakingTTL:             8,
-		FakeSNI:               true,
-		FakeSNISeqLen:         1,
-		FakeSNIType:           FakePayloadDefault,
-		FakeSeqOffset:         10000,
-		SynFake:               false,
-		SynFakeLen:            0,
-		DPortFilter:           true,
-		Seg2Delay:             0,
-		SNIDetection:          0, // parse
-		UDPMode:               UDPMODEFake,
-		UDPFakeSeqLen:         6,
-		UDPFakeLen:            64,
-		UDPFakingStrategy:     FakeStratNone,
-		UDPFilterQuic:         UDPFilterQuicDisabled,
+func (cfg *Config) ParseArgs(args []string) (*Config, error) {
+
+	fs := flag.NewFlagSet("b4", flag.ContinueOnError)
+
+	fs.BoolVar(&cfg.Logging.Instaflush, "instaflush", cfg.Logging.Instaflush, "Enable instant flushing")
+	fs.BoolVar(&cfg.Logging.Syslog, "syslog", cfg.Logging.Syslog, "Enable syslog")
+
+	fs.StringVar(&cfg.Interface, "iface", cfg.Interface, "Set network interface")
+	fs.IntVar(&cfg.Threads, "threads", cfg.Threads, "Set number of threads")
+
+	var (
+		logLevel       = fs.String("log-level", "info", "Set log level")
+		sniDomainsFile = fs.String("sni-domains-file", "", "Set SNI domains file")
+	)
+
+	if err := fs.Parse(args); err != nil {
+		return nil, err
 	}
-	s.ID = id
-	s.prev, s.next = nil, nil
-	s.ensureFakePayload()
 
-	return s
-}
-
-func (c *Config) Sections() []*Section {
-	var list []*Section
-	for s := c.FirstSection; s != nil; s = s.next {
-		list = append(list, s)
+	switch *logLevel {
+	case "info":
+		cfg.Logging.Level = int(log.LevelInfo)
+	case "trace":
+		cfg.Logging.Level = int(log.LevelTrace)
+	case "debug":
+		cfg.Logging.Level = int(log.LevelDebug)
+	default:
+		cfg.Logging.Level = int(log.LevelInfo)
 	}
-	return list
+	log.Tracef("sni domains file: %q", *sniDomainsFile)
+	if err := applyDomainFile(cfg, *sniDomainsFile); err != nil {
+		return nil, fmt.Errorf("domain file error: %w", err)
+	}
+
+	return cfg, nil
 }
 
-func (s *Section) MatchesSNI(host string) bool {
-	host = strings.ToLower(host)
-
-	for _, ex := range s.ExcludeSNIDomains {
-		ex = strings.ToLower(ex)
-		if host == ex || strings.HasSuffix(host, "."+ex) {
-			return false
+func applyDomainFile(cfg *Config, includePath string) error {
+	if includePath != "" {
+		inc, err := readDomainFile(includePath)
+		if err != nil {
+			log.Errorf("read %q: %w", includePath, err)
+			return err
 		}
+		cfg.SNIDomains = append(cfg.SNIDomains, inc...)
 	}
 
-	if s.AllDomains != 0 {
-		return true
-	}
-
-	for _, dom := range s.SNIDomains {
-		dom = strings.ToLower(dom)
-		if host == dom || strings.HasSuffix(host, "."+dom) {
-			return true
-		}
-	}
-	return false
+	// Normalize + dedupe
+	cfg.SNIDomains = dedupeLower(cfg.SNIDomains)
+	log.Infof("Loaded SNI domains: %v", cfg.SNIDomains)
+	return nil
 }
 
-func hexToBytes(hexStr string) ([]byte, error) {
-	if len(hexStr)%2 != 0 {
-		return nil, fmt.Errorf("odd hex length")
+func dedupeLower(in []string) []string {
+	seen := make(map[string]struct{}, len(in))
+	out := in[:0]
+	for _, s := range in {
+		s = strings.ToLower(strings.TrimSpace(s))
+		if s == "" {
+			continue
+		}
+		if _, ok := seen[s]; ok {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
 	}
-	out := make([]byte, len(hexStr)/2)
-	_, err := hex.Decode(out, []byte(hexStr))
-	return out, err
+	return out
+}
+
+func readDomainFile(path string) ([]string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	var out []string
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if i := strings.IndexAny(line, "#;"); i >= 0 {
+			line = line[:i]
+		}
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		l := strings.ToLower(line)
+		if strings.HasPrefix(l, "full:") {
+			line = strings.TrimSpace(line[len("full:"):])
+		} else if strings.HasPrefix(l, "domain:") {
+			line = strings.TrimSpace(line[len("domain:"):])
+		} else if strings.HasPrefix(l, "regexp:") {
+			continue
+		}
+		if line == "" {
+			continue
+		}
+		out = append(out, strings.ToLower(line))
+	}
+	if err := sc.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }

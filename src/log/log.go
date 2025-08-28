@@ -1,4 +1,4 @@
-package logx
+package log
 
 import (
 	"bufio"
@@ -19,6 +19,7 @@ const (
 	LevelError Level = iota
 	LevelInfo
 	LevelTrace
+	LevelDebug
 )
 
 var curLevel atomic.Int32
@@ -123,6 +124,12 @@ func Infof(format string, a ...any) {
 func Tracef(format string, a ...any) {
 	if Level(curLevel.Load()) >= LevelTrace {
 		out("[TRACE] "+format, a...)
+	}
+}
+
+func Debugf(format string, a ...any) {
+	if Level(curLevel.Load()) >= LevelDebug {
+		out("[DEBUG] "+format, a...)
 	}
 }
 

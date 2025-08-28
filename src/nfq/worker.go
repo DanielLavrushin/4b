@@ -1,5 +1,4 @@
-// queue/queue.go
-package queue
+package nfq
 
 import (
 	"context"
@@ -8,12 +7,10 @@ import (
 	"os"
 	"strings"
 
+	"github.com/daniellavrushin/b4/log"
 	nfqueue "github.com/florianl/go-nfqueue"
 	"github.com/mdlayher/netlink"
 	"golang.org/x/sys/unix"
-
-	"github.com/daniellavrushin/b4/logx"
-	"github.com/daniellavrushin/b4/processor"
 )
 
 type nfqIface interface {
@@ -33,7 +30,7 @@ var openNFQ = func(c *nfqueue.Config) (nfqIface, error) {
 }
 
 type Worker struct {
-	qs     []nfqIface // <-- handle both AFs
+	qs     []nfqIface
 	id     uint16
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -54,11 +51,8 @@ func ipv6Available() bool {
 	return fi.Size() > 0
 }
 
-func NewWorker(conf Config, cb processor.Callback) (*Worker, error) {
+func NewWorker(conf Config, cb Callback) (*Worker, error) {
 	flags := uint32(0)
-
-	logx.Tracef("nfqueue(%d): NfQaCfgFlagFailOpen=%v, NfQaCfgFlagGSO=%v, NfQaCfgFlagConntrack=%v",
-		conf.ID, conf.FailOpen, conf.WithGSO, conf.WithConntrack)
 
 	if conf.FailOpen {
 		flags |= nfqueue.NfQaCfgFlagFailOpen
@@ -69,8 +63,8 @@ func NewWorker(conf Config, cb processor.Callback) (*Worker, error) {
 	if conf.WithConntrack {
 		flags |= nfqueue.NfQaCfgFlagConntrack
 	}
-	logx.Tracef("nfqueue(%d): flags=0x%x", conf.ID, flags)
 
+	log.Tracef("nfqueue(%d): created with flags=%d", conf.ID, flags)
 	ctx, cancel := context.WithCancel(context.Background())
 
 	errHook := func(err error) int {
@@ -79,7 +73,7 @@ func NewWorker(conf Config, cb processor.Callback) (*Worker, error) {
 			strings.Contains(err.Error(), "closed") {
 			return 0
 		}
-		logx.Errorf("nfqueue(%d): %v", conf.ID, err)
+		log.Errorf("nfqueue(%d): %v", conf.ID, err)
 		return 0
 	}
 
@@ -93,19 +87,17 @@ func NewWorker(conf Config, cb processor.Callback) (*Worker, error) {
 			AfFamily:     af,
 			NfQueue:      conf.ID,
 			MaxPacketLen: 0xFFFF,
-			MaxQueueLen:  0x800, // 2048
+			MaxQueueLen:  0x800,
 			Copymode:     nfqueue.NfQnlCopyPacket,
 			Flags:        flags,
 		})
 		if err != nil {
-			// allow IPv6 to be absent on some routers
 			if af == unix.AF_INET6 {
 				es := strings.ToLower(err.Error())
 				if strings.Contains(es, "address family not supported") ||
 					strings.Contains(es, "eafnosupport") ||
 					strings.Contains(es, "operation not permitted") ||
 					strings.Contains(es, "permission denied") {
-					logx.Infof("nfqueue(%d): IPv6 queue not available: %v (continuing with IPv4)", conf.ID, err)
 					continue
 				}
 			}
@@ -115,23 +107,20 @@ func NewWorker(conf Config, cb processor.Callback) (*Worker, error) {
 			}
 			return nil, fmt.Errorf("nfqueue(%d, af=%d): %w", conf.ID, af, err)
 		}
-		// hook must capture this specific q (SetVerdict* живут на *Nfqueue)
 		hook := func(a nfqueue.Attribute) int {
-			v := cb(&a) // твой processor.Callback возвращает nfqueue verdict (int)
+			v := cb(&a)
 			if a.PacketID == nil {
 				return 0
 			}
 			id := *a.PacketID
 			if v == int(nfqueue.NfDrop) {
 				if err := q.SetVerdict(id, int(nfqueue.NfDrop)); err != nil {
-					logx.Errorf("nfqueue(%d) SetVerdict drop id=%d: %v", conf.ID, id, err)
+					log.Errorf("nfqueue(%d) SetVerdict drop id=%d: %v", conf.ID, id, err)
 				}
 				return 0
 			}
-			// ACCEPT всегда с mark=0x8000 (32768) — 1-в-1 с C
-			const mark = 32768
-			if err := q.SetVerdictWithMark(id, int(nfqueue.NfAccept), mark); err != nil {
-				logx.Errorf("nfqueue(%d) SetVerdictWithMark id=%d: %v", conf.ID, id, err)
+			if err := q.SetVerdict(id, int(nfqueue.NfAccept)); err != nil {
+				log.Errorf("nfqueue(%d) SetVerdict accept id=%d: %v", conf.ID, id, err)
 			}
 			return 0
 		}
@@ -144,7 +133,7 @@ func NewWorker(conf Config, cb processor.Callback) (*Worker, error) {
 					strings.Contains(es, "address family not supported") ||
 					strings.Contains(es, "protocol not supported") ||
 					strings.Contains(es, "eafnosupport") {
-					logx.Infof("nfqueue(%d): IPv6 register skipped: %v (continuing with IPv4)", conf.ID, err)
+					log.Infof("nfqueue(%d): IPv6 register skipped: %v (continuing with IPv4)", conf.ID, err)
 					_ = q.Close()
 					continue
 				}
@@ -156,7 +145,7 @@ func NewWorker(conf Config, cb processor.Callback) (*Worker, error) {
 			}
 			return nil, err
 		}
-		logx.Tracef("nfqueue(%d): bound af=%d", conf.ID, af)
+		log.Tracef("nfqueue(%d): bound af=%d", conf.ID, af)
 		qs = append(qs, q)
 	}
 	if len(qs) == 0 {

@@ -34,7 +34,7 @@ var DefaultConfig = Config{
 	Mark:           1 << 15, // 32768
 	Threads:        4,
 	ConnBytesLimit: 19,
-	UseConntrack:   true,
+	UseConntrack:   false,
 	UseGSO:         false,
 	Logging: Logging{
 		Level:      int(log.LevelInfo),

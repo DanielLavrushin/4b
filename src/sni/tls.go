@@ -1,5 +1,9 @@
 package sni
 
+import (
+	"github.com/daniellavrushin/b4/log"
+)
+
 const (
 	tlsContentTypeHandshake uint8 = 22 // TLS record type “Handshake”
 	tlsHandshakeClientHello uint8 = 1  // Handshake msg “ClientHello”
@@ -17,6 +21,9 @@ func (e parseErr) Error() string { return string(e) }
 var errNotHello = parseErr("not a ClientHello")
 
 func ParseTLSClientHelloSNI(b []byte) (string, bool) {
+
+	log.Tracef("TCP Payload=%v", len(b))
+
 	i := 0
 	for {
 		if i+5 > len(b) {

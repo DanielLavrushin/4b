@@ -1,8 +1,6 @@
 package sni
 
 import (
-	"encoding/binary"
-
 	"github.com/daniellavrushin/b4/log"
 	"github.com/daniellavrushin/b4/quic"
 	"golang.org/x/crypto/cryptobyte"
@@ -18,7 +16,7 @@ func ParseQUICClientHelloSNI(payload []byte) (string, bool) {
 	plain, ok := quic.DecryptInitial(dcid, payload)
 	if !ok {
 		if len(payload) >= 5 {
-			log.Tracef("QUIC: decrypt failed, ver=%08x", binary.BigEndian.Uint32(payload[1:5]))
+			//log.Tracef("QUIC: decrypt failed, ver=%08x", binary.BigEndian.Uint32(payload[1:5]))
 		}
 		return "", false
 	}
@@ -30,7 +28,7 @@ func ParseQUICClientHelloSNI(payload []byte) (string, bool) {
 
 	host, err := extractSNIFromQUIC(crypto)
 	if err != nil {
-		log.Tracef("QUIC: SNI extraction failed: %v", err)
+		//	log.Tracef("QUIC: SNI extraction failed: %v", err)
 		return "", false
 	}
 	return string(host), true

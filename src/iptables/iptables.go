@@ -121,6 +121,11 @@ func delAnyJumpToB4(ipt, chain string) {
 }
 
 func AddRules(cfg *config.Config) error {
+
+	if cfg.SkipIpTables {
+		return nil
+	}
+
 	log.Infof("IPTABLES: adding rules")
 	has_connbytes := tryModprobe("xt_connbytes")
 	log.Infof("IPTABLES: connbytes support: %v", has_connbytes)
@@ -133,7 +138,6 @@ func AddRules(cfg *config.Config) error {
 	addOnce(ipt, "mangle", "B4", append([]string{"-p",
 		"tcp",
 		"--dport", "443",
-		"-m", "mark", "!", "--mark", fmt.Sprintf("%d/%d", cfg.Mark, cfg.Mark),
 		"-m", "connbytes",
 		"--connbytes-dir", "original",
 		"--connbytes-mode", "packets",
@@ -142,8 +146,6 @@ func AddRules(cfg *config.Config) error {
 
 	addOnce(ipt, "mangle", "B4", append([]string{"-p",
 		"udp",
-		"--dport", "443",
-		"-m", "mark", "!", "--mark", fmt.Sprintf("%d/%d", cfg.Mark, cfg.Mark),
 		"-m", "connbytes",
 		"--connbytes-dir", "original",
 		"--connbytes-mode", "packets",
@@ -153,6 +155,7 @@ func AddRules(cfg *config.Config) error {
 	insertOnce(ipt, "mangle", "PREROUTING", []string{"-j", "B4"})
 	insertOnce(ipt, "mangle", "POSTROUTING", []string{"-j", "B4"})
 	insertOnce(ipt, "mangle", "OUTPUT", []string{"-j", "B4"})
+	insertOnce(ipt, "mangle", "OUTPUT", []string{"-m", "mark", "--mark", fmt.Sprintf("%d/%d", cfg.Mark, cfg.Mark), "-j", "ACCEPT"})
 
 	setSysctlOrProc("net.netfilter.nf_conntrack_checksum", "0")
 	setSysctlOrProc("net.netfilter.nf_conntrack_tcp_be_liberal", "1")
@@ -160,6 +163,10 @@ func AddRules(cfg *config.Config) error {
 }
 
 func ClearRules(cfg *config.Config) error {
+	if cfg.SkipIpTables {
+		return nil
+	}
+
 	log.Infof("IPTABLES: clearing rules")
 
 	const ipt = "iptables"
@@ -181,9 +188,9 @@ func ClearRules(cfg *config.Config) error {
 
 	// Remove jumps to B4 we added
 	delAll(ipt, "mangle", "OUTPUT", []string{"-p", "tcp", "--dport", "443", "-j", "B4"})
-	delAnyJumpToB4(ipt, "OUTPUT")      // sweep stragglers
-	delAnyJumpToB4(ipt, "PREROUTING")  // if any were left
-	delAnyJumpToB4(ipt, "POSTROUTING") // if any were left
+	delAnyJumpToB4(ipt, "OUTPUT")
+	delAnyJumpToB4(ipt, "PREROUTING")
+	delAnyJumpToB4(ipt, "POSTROUTING")
 
 	time.Sleep(30 * time.Millisecond)
 

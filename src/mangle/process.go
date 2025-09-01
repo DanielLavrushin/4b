@@ -45,32 +45,40 @@ func ProcessPacket(cfg *config.Config, bytes []byte) Verdict {
 	}
 
 	parser := gopacket.NewDecodingLayerParser(first, &ip4, &ip6, &tcp, &udp, &pl)
-
 	decoded := []gopacket.LayerType{}
 	if err := parser.DecodeLayers(bytes, &decoded); err != nil {
 		return VerdictAccept
 	}
 
-	// For visibility while you debug
-	log.Tracef("decoded=%v payloadLen=%d", decoded, len(pl))
+	var ip4p *layers.IPv4
+	var ip6p *layers.IPv6
+	for _, lt := range decoded {
+		switch lt {
+		case layers.LayerTypeIPv4:
+			ip4p = &ip4
+		case layers.LayerTypeIPv6:
+			ip6p = &ip6
+		}
+	}
 
 	for _, lt := range decoded {
 		switch lt {
 		case layers.LayerTypeTCP:
-			// Only care about TLS over 443
-			if (tcp.DstPort != 443 && tcp.SrcPort != 443) || len(pl) == 0 {
+			if tcp.DstPort != 443 && tcp.SrcPort != 443 {
 				continue
 			}
-			if host, ok := sni.ParseTLSClientHelloSNI(pl); ok && host != "" {
-				log.Infof("Target SNI detected (TLS): %s", host)
+			v := processTCP(&tcp, ip4p, ip6p, bytes)
+			if v != VerdictContinue {
+				return v
 			}
-
 		case layers.LayerTypeUDP:
-			// Only care about QUIC over 443
-			if (udp.DstPort != 443 && udp.SrcPort != 443) || len(pl) == 0 {
+			if udp.DstPort != 443 && udp.SrcPort != 443 {
 				continue
 			}
-			if host, ok := sni.ParseQUICClientHelloSNI(pl); ok && host != "" {
+			if len(udp.Payload) == 0 {
+				continue
+			}
+			if host, ok := sni.ParseQUICClientHelloSNI(udp.Payload); ok && host != "" {
 				log.Infof("Target SNI detected (QUIC): %s", host)
 			}
 		}

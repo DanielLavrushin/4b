@@ -27,6 +27,7 @@ type Config struct {
 	Threads      int
 	UseGSO       bool
 	UseConntrack bool
+	SkipIpTables bool
 }
 
 var DefaultConfig = Config{
@@ -36,6 +37,7 @@ var DefaultConfig = Config{
 	ConnBytesLimit: 19,
 	UseConntrack:   false,
 	UseGSO:         false,
+	SkipIpTables:   false,
 	Logging: Logging{
 		Level:      int(log.LevelInfo),
 		Instaflush: true,
@@ -58,6 +60,10 @@ func (cfg *Config) ParseArgs(args []string) (*Config, error) {
 		sniDomainsFile = fs.String("sni-domains-file", "", "Set SNI domains file")
 	)
 
+	fs.BoolVar(&cfg.UseConntrack, "conntrack", cfg.UseConntrack, "Enable conntrack")
+	fs.BoolVar(&cfg.UseGSO, "gso", cfg.UseGSO, "Enable GSO")
+	fs.BoolVar(&cfg.SkipIpTables, "skip-iptables", cfg.SkipIpTables, "Skip iptables")
+
 	if err := fs.Parse(args); err != nil {
 		return nil, err
 	}
@@ -72,6 +78,7 @@ func (cfg *Config) ParseArgs(args []string) (*Config, error) {
 	default:
 		cfg.Logging.Level = int(log.LevelInfo)
 	}
+
 	log.Tracef("sni domains file: %q", *sniDomainsFile)
 	if err := applyDomainFile(cfg, *sniDomainsFile); err != nil {
 		return nil, fmt.Errorf("domain file error: %w", err)

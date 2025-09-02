@@ -41,6 +41,7 @@ type Config struct {
 	WithGSO       bool
 	WithConntrack bool
 	FailOpen      bool
+	VerdictMark   uint32
 }
 
 func ipv6Available() bool {
@@ -68,9 +69,7 @@ func NewWorker(conf Config, cb Callback) (*Worker, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	errHook := func(err error) int {
-		if ctx.Err() != nil ||
-			errors.Is(err, os.ErrClosed) ||
-			strings.Contains(err.Error(), "closed") {
+		if ctx.Err() != nil || errors.Is(err, os.ErrClosed) || strings.Contains(err.Error(), "closed") {
 			return 0
 		}
 		log.Errorf("nfqueue(%d): %v", conf.ID, err)
@@ -94,10 +93,7 @@ func NewWorker(conf Config, cb Callback) (*Worker, error) {
 		if err != nil {
 			if af == unix.AF_INET6 {
 				es := strings.ToLower(err.Error())
-				if strings.Contains(es, "address family not supported") ||
-					strings.Contains(es, "eafnosupport") ||
-					strings.Contains(es, "operation not permitted") ||
-					strings.Contains(es, "permission denied") {
+				if strings.Contains(es, "address family not supported") || strings.Contains(es, "eafnosupport") || strings.Contains(es, "operation not permitted") || strings.Contains(es, "permission denied") {
 					continue
 				}
 			}
@@ -119,20 +115,15 @@ func NewWorker(conf Config, cb Callback) (*Worker, error) {
 				}
 				return 0
 			}
-			if err := q.SetVerdict(id, int(nfqueue.NfAccept)); err != nil {
-				log.Errorf("nfqueue(%d) SetVerdict accept id=%d: %v", conf.ID, id, err)
+			if err := q.SetVerdictWithMark(id, int(nfqueue.NfAccept), int(conf.VerdictMark)); err != nil {
+				log.Errorf("nfqueue(%d) SetVerdictWithMark accept id=%d: %v", conf.ID, id, err)
 			}
 			return 0
 		}
-
 		if err := q.RegisterWithErrorFunc(ctx, hook, errHook); err != nil {
 			if af == unix.AF_INET6 {
 				es := strings.ToLower(err.Error())
-				if strings.Contains(es, "operation not permitted") ||
-					strings.Contains(es, "permission denied") ||
-					strings.Contains(es, "address family not supported") ||
-					strings.Contains(es, "protocol not supported") ||
-					strings.Contains(es, "eafnosupport") {
+				if strings.Contains(es, "operation not permitted") || strings.Contains(es, "permission denied") || strings.Contains(es, "address family not supported") || strings.Contains(es, "protocol not supported") || strings.Contains(es, "eafnosupport") {
 					log.Infof("nfqueue(%d): IPv6 register skipped: %v (continuing with IPv4)", conf.ID, err)
 					_ = q.Close()
 					continue

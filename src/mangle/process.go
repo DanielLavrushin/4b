@@ -2,7 +2,6 @@ package mangle
 
 import (
 	"github.com/daniellavrushin/b4/config"
-	"github.com/daniellavrushin/b4/log"
 	"github.com/daniellavrushin/b4/sni"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
@@ -79,7 +78,7 @@ func ProcessPacket(cfg *config.Config, bytes []byte) Verdict {
 				continue
 			}
 			if host, ok := sni.ParseQUICClientHelloSNI(udp.Payload); ok && host != "" {
-				log.Infof("Target SNI detected (QUIC): %s", host)
+				//	log.Infof("Target SNI detected (QUIC): %s", host)
 			}
 		}
 	}

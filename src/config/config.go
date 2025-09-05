@@ -38,6 +38,7 @@ var DefaultConfig = Config{
 	UseConntrack:   false,
 	UseGSO:         false,
 	SkipIpTables:   false,
+	Interface:      "*",
 	Logging: Logging{
 		Level:      int(log.LevelInfo),
 		Instaflush: true,
@@ -52,7 +53,6 @@ func (cfg *Config) ParseArgs(args []string) (*Config, error) {
 	fs.BoolVar(&cfg.Logging.Instaflush, "instaflush", cfg.Logging.Instaflush, "Enable instant flushing")
 	fs.BoolVar(&cfg.Logging.Syslog, "syslog", cfg.Logging.Syslog, "Enable syslog")
 
-	fs.StringVar(&cfg.Interface, "iface", cfg.Interface, "Set network interface")
 	fs.IntVar(&cfg.Threads, "threads", cfg.Threads, "Set number of threads")
 
 	var (
@@ -63,6 +63,8 @@ func (cfg *Config) ParseArgs(args []string) (*Config, error) {
 	fs.BoolVar(&cfg.UseConntrack, "conntrack", cfg.UseConntrack, "Enable conntrack")
 	fs.BoolVar(&cfg.UseGSO, "gso", cfg.UseGSO, "Enable GSO")
 	fs.BoolVar(&cfg.SkipIpTables, "skip-iptables", cfg.SkipIpTables, "Skip iptables")
+
+	fs.StringVar(&cfg.Interface, "iface", cfg.Interface, "Set sniffer interface")
 
 	if err := fs.Parse(args); err != nil {
 		return nil, err

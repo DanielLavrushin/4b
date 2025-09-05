@@ -2,15 +2,16 @@ package main
 
 import (
 	"bytes"
-	"fmt"
+	"net"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
+	"github.com/daniellavrushin/b4/afp"
 	"github.com/daniellavrushin/b4/config"
 	"github.com/daniellavrushin/b4/iptables"
 	"github.com/daniellavrushin/b4/log"
-	"github.com/daniellavrushin/b4/nfq"
 )
 
 func main() {
@@ -22,42 +23,66 @@ func main() {
 	log.Infof("starting B4...")
 	log.Infof("Running with flags: %s", flagsSummary(os.Args[1:]))
 
-	iptables.ClearRules(&cfg)
-	if err := iptables.AddRules(&cfg); err != nil {
-		log.Errorf("failed to add iptables rules: %v", err)
+	if !cfg.SkipIpTables {
+		iptables.ClearRules(&cfg)
+		if err := iptables.AddRules(&cfg); err != nil {
+			log.Errorf("failed to add iptables rules: %v", err)
+			os.Exit(1)
+		}
+	}
+
+	var ifaces []string
+	if cfg.Interface == "" || cfg.Interface == "*" {
+		ifs, _ := net.Interfaces()
+		for _, inf := range ifs {
+			if inf.Flags&net.FlagUp == 0 {
+				continue
+			}
+			if inf.Flags&net.FlagLoopback != 0 {
+				continue
+			}
+			ifaces = append(ifaces, inf.Name)
+		}
+	} else {
+		ifaces = []string{cfg.Interface}
+	}
+
+	var sniffers []*afp.Sniffer
+	for _, name := range ifaces {
+		sn, err := afp.NewSniffer(afp.Config{
+			Iface:               name,
+			SnapLen:             96 * 1024,
+			FlowTTL:             10 * time.Second,
+			MaxClientHelloBytes: 8192,
+			Promisc:             true,
+			OnTLSHost:           func(ft afp.FiveTuple, host string) {},
+			OnQUICHost:          func(ft afp.FiveTuple, host string) {},
+		})
+		if err != nil {
+			log.Errorf("AF_PACKET start failed on %s: %v", name, err)
+			continue
+		}
+		sn.Run()
+		sniffers = append(sniffers, sn)
+		log.Infof("AF_PACKET listening on %s", name)
+	}
+	if len(sniffers) == 0 {
+		log.Errorf("no interfaces to sniff")
 		os.Exit(1)
 	}
 
-	cb := nfq.MakeCallback(&cfg)
-	workers := make([]*nfq.Worker, cfg.Threads)
-	for i := 0; i < cfg.Threads; i++ {
-		id := uint16(uint(cfg.QueueStartNum) + uint(i))
-		w, err := nfq.NewWorker(nfq.Config{
-			ID:            id,
-			WithGSO:       cfg.UseGSO,
-			WithConntrack: cfg.UseConntrack,
-			FailOpen:      true,
-		}, cb)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "NFQUEUE init failed for id %d: %v\n", id, err)
-			os.Exit(1)
-		}
-		workers[i] = w
-		go w.Run()
-		log.Tracef("worker %d started", id)
-	}
-
-	// 4) Wait for signal
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-	s := <-sig
-	log.Infof("signal %s received, shutting down...", s)
-	for _, w := range workers {
-		w.Close()
+	<-sig
+
+	for _, sn := range sniffers {
+		sn.Close()
 	}
 
-	if err := iptables.ClearRules(&cfg); err != nil {
-		log.Errorf("failed to clear iptables rules: %v", err)
+	if !cfg.SkipIpTables {
+		if err := iptables.ClearRules(&cfg); err != nil {
+			log.Errorf("failed to clear iptables rules: %v", err)
+		}
 	}
 	log.Infof("bye")
 }

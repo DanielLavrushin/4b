@@ -7,7 +7,7 @@ import (
 )
 
 func processTCP(tcp *layers.TCP, ip4 *layers.IPv4, ip6 *layers.IPv6, raw []byte) Verdict {
-	log.Tracef("tcp syn=%v ack=%v psh=%v rst=%v fin=%v len=%d", tcp.SYN, tcp.ACK, tcp.PSH, tcp.RST, tcp.FIN, len(tcp.Payload))
+	//log.Tracef("tcp syn=%v ack=%v psh=%v rst=%v fin=%v len=%d", tcp.SYN, tcp.ACK, tcp.PSH, tcp.RST, tcp.FIN, len(tcp.Payload))
 	pl, ok := splitTCP(raw)
 
 	if !ok || len(pl) == 0 {

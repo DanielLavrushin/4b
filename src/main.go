@@ -8,10 +8,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/daniellavrushin/b4/afp"
 	"github.com/daniellavrushin/b4/config"
 	"github.com/daniellavrushin/b4/iptables"
 	"github.com/daniellavrushin/b4/log"
+	"github.com/daniellavrushin/b4/sni"
 )
 
 func main() {
@@ -31,6 +31,11 @@ func main() {
 		}
 	}
 
+	var matcher *sni.SuffixSet
+	if len(cfg.SNIDomains) > 0 {
+		matcher = sni.NewSuffixSet(cfg.SNIDomains)
+	}
+
 	var ifaces []string
 	if cfg.Interface == "" || cfg.Interface == "*" {
 		ifs, _ := net.Interfaces()
@@ -47,16 +52,17 @@ func main() {
 		ifaces = []string{cfg.Interface}
 	}
 
-	var sniffers []*afp.Sniffer
+	var sniffers []*sni.Sniffer
 	for _, name := range ifaces {
-		sn, err := afp.NewSniffer(afp.Config{
+		sn, err := sni.NewSniffer(sni.Config{
 			Iface:               name,
 			SnapLen:             96 * 1024,
 			FlowTTL:             10 * time.Second,
 			MaxClientHelloBytes: 8192,
 			Promisc:             true,
-			OnTLSHost:           func(ft afp.FiveTuple, host string) {},
-			OnQUICHost:          func(ft afp.FiveTuple, host string) {},
+			Matcher:             matcher,
+			OnTLSHost:           func(ft sni.FiveTuple, host string) {},
+			OnQUICHost:          func(ft sni.FiveTuple, host string) {},
 		})
 		if err != nil {
 			log.Errorf("AF_PACKET start failed on %s: %v", name, err)

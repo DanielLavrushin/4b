@@ -1,8 +1,10 @@
 package mangle
 
 import (
+	"strings"
+	"time"
+
 	"github.com/daniellavrushin/b4/config"
-	"github.com/daniellavrushin/b4/sni"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 )
@@ -15,61 +17,44 @@ const (
 	VerdictContinue
 )
 
-func IPVersion(pkt []byte) int {
-	if len(pkt) < 1 {
-		return 0
-	}
-	switch pkt[0] >> 4 {
-	case 4:
-		return 4
-	case 6:
-		return 6
-	default:
-		return 0
-	}
-}
+var (
+	defaultFragStrategyTCP   = true
+	defaultFragSNIReverse    = true
+	defaultFragMiddleSNI     = true
+	defaultFragSNIPos        = 1
+	defaultFakeSeqOffset     = 10000
+	defaultFakeSNISeqLen     = 1
+	defaultSeg2Delay         = 0 * time.Millisecond
+	defaultUDPModeFake       = true
+	defaultUDPFakeSeqLen     = 6
+	defaultUDPFakeLen        = 64
+	defaultUDPFakingChecksum = false
+)
 
-func ProcessPacket(cfg *config.Config, bytes []byte) Verdict {
-	var (
-		ip4 layers.IPv4
-		ip6 layers.IPv6
-		tcp layers.TCP
-		udp layers.UDP
-		pl  gopacket.Payload
-	)
-
-	first := layers.LayerTypeIPv4
-	if IPVersion(bytes) == 6 {
-		first = layers.LayerTypeIPv6
-	}
-
-	parser := gopacket.NewDecodingLayerParser(first, &ip4, &ip6, &tcp, &udp, &pl)
-	decoded := []gopacket.LayerType{}
-	if err := parser.DecodeLayers(bytes, &decoded); err != nil {
+func Process(cfg *config.Config, pkt []byte) Verdict {
+	if cfg == nil || len(pkt) < 1 {
 		return VerdictAccept
 	}
-
-	var ip4p *layers.IPv4
-	var ip6p *layers.IPv6
-	for _, lt := range decoded {
-		switch lt {
-		case layers.LayerTypeIPv4:
-			ip4p = &ip4
-		case layers.LayerTypeIPv6:
-			ip6p = &ip6
-		}
+	ensureRawOnce(cfg.Mark)
+	dec := gopacket.NewDecodingLayerParser(layers.LayerTypeIPv4, &ipv4, &ipv6, &tcp, &udp, &payload)
+	decoded := decodedLayers[:0]
+	if err := dec.DecodeLayers(pkt, &decoded); err != nil {
+		return VerdictAccept
 	}
-
-	for _, lt := range decoded {
-		switch lt {
+	matcher := func(host string) bool { return anySuffixMatch(strings.ToLower(host), cfg.SNIDomains) }
+	for _, l := range decoded {
+		switch l {
 		case layers.LayerTypeTCP:
 			if tcp.DstPort != 443 && tcp.SrcPort != 443 {
 				continue
 			}
-			v := processTCP(&tcp, ip4p, ip6p, bytes)
-			if v != VerdictContinue {
-				return v
+			rawL3 := pkt
+			if ipv4.LayerContents() != nil {
+				rawL3 = pkt
+			} else if ipv6.LayerContents() != nil {
+				rawL3 = pkt
 			}
+			return processTCP(matcher, rawL3)
 		case layers.LayerTypeUDP:
 			if udp.DstPort != 443 && udp.SrcPort != 443 {
 				continue
@@ -77,11 +62,44 @@ func ProcessPacket(cfg *config.Config, bytes []byte) Verdict {
 			if len(udp.Payload) == 0 {
 				continue
 			}
-			if host, ok := sni.ParseQUICClientHelloSNI(udp.Payload); ok && host != "" {
-				//	log.Infof("Target SNI detected (QUIC): %s", host)
+			if ipv4.LayerContents() != nil {
+				return processUDP(matcher, pkt, false)
+			} else if ipv6.LayerContents() != nil {
+				return processUDP(matcher, pkt, true)
 			}
 		}
 	}
-
 	return VerdictAccept
 }
+
+func anySuffixMatch(host string, suffixes []string) bool {
+	if host == "" || len(suffixes) == 0 {
+		return false
+	}
+	for _, s := range suffixes {
+		s = strings.TrimSpace(strings.ToLower(s))
+		if s == "" {
+			continue
+		}
+		if strings.HasPrefix(s, "*.") {
+			s = strings.TrimPrefix(s, "*.")
+		}
+		if strings.HasPrefix(s, ".") {
+			s = strings.TrimPrefix(s, ".")
+		}
+		if host == s || strings.HasSuffix(host, "."+s) {
+			return true
+		}
+	}
+	return false
+}
+
+var (
+	ipv4    layers.IPv4
+	ipv6    layers.IPv6
+	tcp     layers.TCP
+	udp     layers.UDP
+	payload gopacket.Payload
+
+	decodedLayers [8]gopacket.LayerType
+)

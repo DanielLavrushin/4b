@@ -7,36 +7,34 @@ import (
 )
 
 func ParseQUICClientHelloSNI(payload []byte) (string, bool) {
-
 	if !quic.IsInitial(payload) {
 		return "", false
 	}
-
 	dcid := quic.ParseDCID(payload)
 	plain, ok := quic.DecryptInitial(dcid, payload)
 	if !ok {
-		if len(payload) >= 5 {
-			//log.Tracef("QUIC: decrypt failed, ver=%08x", binary.BigEndian.Uint32(payload[1:5]))
-		}
 		return "", false
 	}
-	crypto, ok := quic.AssembleCrypto(dcid, plain)
+	crypto, ok := assembleSafe(dcid, plain)
 	if !ok || len(crypto) == 0 {
 		log.Tracef("QUIC: no CRYPTO frames")
 		return "", false
 	}
-
 	host, err := extractSNIFromQUIC(crypto)
-	if err != nil {
-		//	log.Tracef("QUIC: SNI extraction failed: %v", err)
+	if err != nil || host == nil || len(host) == 0 {
 		return "", false
 	}
+	quic.ClearDCID(dcid)
 	return string(host), true
+}
+
+func assembleSafe(dcid, plain []byte) ([]byte, bool) {
+	defer func() { _ = recover() }()
+	return quic.AssembleCrypto(dcid, plain)
 }
 
 func extractSNIFromQUIC(crypto []byte) ([]byte, error) {
 	s := cryptobyte.String(crypto)
-
 	for !s.Empty() {
 		var hsType uint8
 		if !s.ReadUint8(&hsType) {
@@ -49,10 +47,8 @@ func extractSNIFromQUIC(crypto []byte) ([]byte, error) {
 		if hsType != tlsHandshakeClientHello {
 			continue
 		}
-
-		// ---- Parse ClientHello ----
 		ch := body
-		if !ch.Skip(2 + 32) { // legacy_version + random
+		if !ch.Skip(2 + 32) {
 			return nil, errNotHello
 		}
 		var sid, ciphers, comp, exts cryptobyte.String
@@ -68,7 +64,6 @@ func extractSNIFromQUIC(crypto []byte) ([]byte, error) {
 		if !ch.ReadUint16LengthPrefixed(&exts) {
 			return nil, errNotHello
 		}
-
 		for !exts.Empty() {
 			var typ uint16
 			var extData cryptobyte.String
@@ -84,7 +79,7 @@ func extractSNIFromQUIC(crypto []byte) ([]byte, error) {
 			}
 			for !sniList.Empty() {
 				var nameType uint8
-				if !sniList.ReadUint8(&nameType) || nameType != 0 { // host_name
+				if !sniList.ReadUint8(&nameType) || nameType != 0 {
 					return nil, errNotHello
 				}
 				var host cryptobyte.String
@@ -94,7 +89,6 @@ func extractSNIFromQUIC(crypto []byte) ([]byte, error) {
 				if len(host) == 0 {
 					return nil, errNotHello
 				}
-				// ВАЖНО: делаем копию, чтобы отвязаться от исходного буфера.
 				hcopy := append([]byte(nil), host...)
 				return hcopy, nil
 			}

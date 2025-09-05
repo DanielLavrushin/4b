@@ -1,4 +1,6 @@
-package afp
+//go:build linux
+
+package sni
 
 import (
 	"encoding/binary"
@@ -8,7 +10,6 @@ import (
 	"time"
 
 	"github.com/daniellavrushin/b4/log"
-	"github.com/daniellavrushin/b4/sni"
 	"golang.org/x/sys/unix"
 )
 
@@ -26,6 +27,7 @@ type Config struct {
 	FlowTTL             time.Duration
 	MaxClientHelloBytes int
 	Promisc             bool
+	Matcher             *SuffixSet
 	OnTLSHost           func(FiveTuple, string)
 	OnQUICHost          func(FiveTuple, string)
 }
@@ -133,7 +135,7 @@ func (s *Sniffer) rxLoop() {
 			return
 		}
 		ll, _ := from.(*unix.SockaddrLinklayer)
-		if ll != nil && ll.Ifindex == s.ifindex && ll.Pkttype != unix.PACKET_OUTGOING {
+		if ll != nil && ll.Ifindex == s.ifindex {
 			s.handleFrame(s.buf[:n])
 		}
 	}
@@ -248,13 +250,20 @@ func (s *Sniffer) handleUDP(v6 bool, src, dst, udp []byte) {
 	if len(payload) == 0 {
 		return
 	}
+	log.Tracef("UDP:443 seen v6=%v len=%d", v6, len(payload))
 	var key FiveTuple
 	fillKey(&key, v6, src, dst, binary.BigEndian.Uint16(udp[0:2]), dport)
-	if host, ok := sni.ParseQUICClientHelloSNI(payload); ok && host != "" {
-		log.Infof("Target SNI detected (QUIC): %s", host)
-		if s.cfg.OnQUICHost != nil {
-			s.cfg.OnQUICHost(key, host)
-		}
+	host, ok := ParseQUICClientHelloSNI(payload)
+	log.Tracef("QUIC SNI parse: %v, host=%q", ok, host)
+	if !ok || host == "" {
+		return
+	}
+	if s.cfg.Matcher != nil && !s.cfg.Matcher.Match(host) {
+		return
+	}
+	log.Infof("Target SNI detected (QUIC): %s", host)
+	if s.cfg.OnQUICHost != nil {
+		s.cfg.OnQUICHost(key, host)
 	}
 }
 
@@ -274,10 +283,9 @@ func (s *Sniffer) handleTCP(v6 bool, src, dst, tcp []byte) {
 	}
 	seq := binary.BigEndian.Uint32(tcp[4:8])
 	payload := tcp[dataOff:]
-
+	log.Tracef("TCP:443 seen v6=%v flags=0x%02x seq=%d len=%d", v6, flags, seq, len(payload))
 	var key FiveTuple
 	fillKey(&key, v6, src, dst, sport, dport)
-
 	now := time.Now()
 	s.mu.Lock()
 	f, ok := s.flows[key]
@@ -309,7 +317,14 @@ func (s *Sniffer) handleTCP(v6 bool, src, dst, tcp []byte) {
 		}
 		f.last = now
 		if len(f.buf) >= 5 {
-			if host, ok := sni.ParseTLSClientHelloSNI(f.buf); ok && host != "" {
+			host, ok := ParseTLSClientHelloSNI(f.buf)
+			log.Tracef("TLS SNI parse: %v, host=%q", ok, host)
+			if ok && host != "" {
+				if s.cfg.Matcher != nil && !s.cfg.Matcher.Match(host) {
+					delete(s.flows, key)
+					s.mu.Unlock()
+					return
+				}
 				log.Infof("Target SNI detected (TLS): %s", host)
 				delete(s.flows, key)
 				s.mu.Unlock()
@@ -320,6 +335,7 @@ func (s *Sniffer) handleTCP(v6 bool, src, dst, tcp []byte) {
 			}
 		}
 		if len(f.buf) >= s.cfg.MaxClientHelloBytes {
+			log.Tracef("TLS: buffer cap %d reached without ClientHello", s.cfg.MaxClientHelloBytes)
 			delete(s.flows, key)
 		}
 	} else {

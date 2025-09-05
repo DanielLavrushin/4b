@@ -1,6 +1,6 @@
 //go:build linux
 
-package afp
+package sni
 
 import (
 	"encoding/binary"
